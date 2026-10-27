@@ -70,6 +70,10 @@ class BluetoothHidKeyboard(private val context: Context) {
     var lastHostControlRequest: String = "none"
         private set
 
+    @Volatile
+    var lastProfileTransition: String = "none"
+        private set
+
     private val executor = Executor { task -> mainHandler.post(task) }
 
     private val callback = object : BluetoothHidDevice.Callback() {
@@ -100,15 +104,22 @@ class BluetoothHidKeyboard(private val context: Context) {
             id: Byte,
             bufferSize: Int,
         ) {
-            lastHostControlRequest = "GET_REPORT(type=${type.toInt()}, id=${id.toInt()})"
+            lastHostControlRequest = "GET_REPORT(type=${type.toInt()}, id=${id.toInt()}, size=$bufferSize)"
             val service = hid ?: return
             if (!hasPermission()) return
-            // When a host requests the current state of the keyboard, reply with
-            // an all-keys-released input report. No user or vault data is accessed.
-            if (type == BluetoothHidDevice.REPORT_TYPE_INPUT && id.toInt() == REPORT_ID) {
-                service.replyReport(device, type, id, ByteArray(8))
-            } else {
+            if (id.toInt() != REPORT_ID) {
                 service.reportError(device, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
+                return
+            }
+            when (type) {
+                // Never reflect real keys here. Reply with all keys released.
+                BluetoothHidDevice.REPORT_TYPE_INPUT ->
+                    service.replyReport(device, type, id, ByteArray(KEYBOARD_INPUT_BYTES))
+                // Standard keyboard LED output is exactly one byte.
+                BluetoothHidDevice.REPORT_TYPE_OUTPUT ->
+                    service.replyReport(device, type, id, ByteArray(LED_OUTPUT_BYTES))
+                else ->
+                    service.reportError(device, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
             }
         }
 
@@ -123,14 +134,48 @@ class BluetoothHidKeyboard(private val context: Context) {
             id: Byte,
             data: ByteArray,
         ) {
-            lastHostControlRequest = "SET_REPORT(type=${type.toInt()}, id=${id.toInt()})"
-            // This descriptor has no output or feature reports: reject unsupported writes.
+            lastHostControlRequest =
+                "SET_REPORT(type=${type.toInt()}, id=${id.toInt()}, size=${data.size})"
+            if (type == BluetoothHidDevice.REPORT_TYPE_OUTPUT &&
+                id.toInt() == REPORT_ID && data.size == LED_OUTPUT_BYTES
+            ) {
+                // Num/Caps/Scroll lock LED state from the host; no keystrokes and
+                // no credentials. Valid SET_REPORT is acknowledged by the stack.
+                return
+            }
             if (hasPermission()) {
                 hid?.reportError(device, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
             }
         }
 
+        override fun onInterruptData(
+            device: BluetoothDevice,
+            reportId: Byte,
+            data: ByteArray,
+        ) {
+            // HID keyboard LED state may arrive on the interrupt OUT channel.
+            // Never record its payload; metadata is sufficient for diagnosis.
+            lastHostControlRequest =
+                "INTERRUPT_OUT(id=${reportId.toInt()}, size=${data.size})"
+        }
+
+        override fun onVirtualCableUnplug(device: BluetoothDevice) {
+            lastHostControlRequest = "VIRTUAL_CABLE_UNPLUG"
+            lastProfileTransition = "VirtualCableUnplug"
+            if (device.address == selectedPeerAddress) {
+                peer = null
+                state = State.Error("Host removed the HID virtual cable; re-pair may be required")
+            }
+        }
+
         override fun onConnectionStateChanged(device: BluetoothDevice, newState: Int) {
+            lastProfileTransition = when (newState) {
+                BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+                BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
+                BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
+                BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+                else -> "UNKNOWN($newState)"
+            }
             // Unsolicited host connections must not become approved input destinations.
             // The user can explicitly select an already-connected bonded host later.
             if (device.address != selectedPeerAddress) return
@@ -275,7 +320,8 @@ class BluetoothHidKeyboard(private val context: Context) {
                 "NO_PERMISSION"
             }
         } ?: "NO_HOST_SELECTED"
-        return "registered=$isRegistered, HID=$connection, lastHostRequest=$lastHostControlRequest"
+        return "registered=$isRegistered, HID=$connection, " +
+            "lastTransition=$lastProfileTransition, lastHostRequest=$lastHostControlRequest"
     }
 
     /** Refresh the actual Bluetooth HID profile state without connecting a new host. */
@@ -361,13 +407,23 @@ class BluetoothHidKeyboard(private val context: Context) {
         // therefore requires ID 0 and EXACTLY eight report bytes, with no ID prefix.
         // This is a single, boot-style keyboard HID report (not a mouse or combo).
         private const val REPORT_ID = 0
+        private const val KEYBOARD_INPUT_BYTES = 8
+        private const val LED_OUTPUT_BYTES = 1
 
-        // Keyboard input report: modifier, reserved, six key slots.
+        // Standard boot-style keyboard with one-byte LED output report.
+        // 8-byte IN = modifier + reserved + 6 keys.
+        // 1-byte OUT = five lock LEDs + three padding bits.
+        // No Report ID tag: use id=0 with Android's HID APIs.
         private val REPORT_DESCRIPTOR = byteArrayOf(
             0x05, 0x01, 0x09, 0x06, 0xA1.toByte(), 0x01,
             0x05, 0x07, 0x19, 0xE0.toByte(), 0x29, 0xE7.toByte(), 0x15, 0x00,
             0x25, 0x01, 0x75, 0x01, 0x95.toByte(), 0x08, 0x81.toByte(), 0x02,
-            0x95.toByte(), 0x01, 0x75, 0x08, 0x81.toByte(), 0x01,
+            0x95.toByte(), 0x01, 0x75, 0x08, 0x81.toByte(), 0x03,
+            // Output: NumLock, CapsLock, ScrollLock, Compose, Kana
+            0x95.toByte(), 0x05, 0x75, 0x01, 0x05, 0x08,
+            0x19, 0x01, 0x29, 0x05, 0x91.toByte(), 0x02,
+            0x95.toByte(), 0x01, 0x75, 0x03, 0x91.toByte(), 0x03,
+            // Six simultaneous key usages, each 8 bits.
             0x95.toByte(), 0x06, 0x75, 0x08, 0x15, 0x00, 0x25, 0x65,
             0x05, 0x07, 0x19, 0x00, 0x29, 0x65, 0x81.toByte(), 0x00,
             0xC0.toByte(),
