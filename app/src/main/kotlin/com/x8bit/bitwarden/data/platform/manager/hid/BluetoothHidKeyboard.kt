@@ -11,9 +11,16 @@ import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executor
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 
 /**
  * Experimental, explicit-user-action-only Bluetooth HID keyboard transport.
@@ -34,26 +41,42 @@ class BluetoothHidKeyboard(private val context: Context) {
         data class Error(val reason: String) : State
     }
 
+    /** Receive connection changes on the main thread. No secrets are ever passed to listeners. */
+    @Volatile
+    var onStateChanged: ((State) -> Unit)? = null
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val sendMutex = Mutex()
+
     @Volatile
     var state: State = State.Idle
-        private set
+        private set(value) {
+            field = value
+            mainHandler.post { onStateChanged?.invoke(value) }
+        }
 
     private val adapter: BluetoothAdapter?
         get() = context.getSystemService(BluetoothManager::class.java)?.adapter
 
     private var hid: BluetoothHidDevice? = null
     private var peer: BluetoothDevice? = null
-    private val executor = Executor { task -> task.run() }
+    private var selectedPeerAddress: String? = null
+    private val executor = Executor { task -> mainHandler.post(task) }
 
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
-            state = if (registered) State.Ready else State.Idle
+            state = if (!registered) State.Idle else peer?.let {
+                State.Connected(it.address)
+            } ?: State.Ready
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice, newState: Int) {
             if (newState == BluetoothProfile.STATE_CONNECTED) {
-                peer = device
-                state = State.Connected(device.address)
+                // An incoming HID connection is never authorization to transmit.
+                if (device.address == selectedPeerAddress) {
+                    peer = device
+                    state = State.Connected(device.address)
+                }
             } else if (peer?.address == device.address) {
                 peer = null
                 state = State.Ready
@@ -113,22 +136,54 @@ class BluetoothHidKeyboard(private val context: Context) {
 
     fun connect(device: BluetoothDevice): Boolean {
         if (!hasPermission() || device.bondState != BluetoothDevice.BOND_BONDED) return false
-        return hid?.connect(device) ?: false
+        if (state != State.Ready) return false
+        val service = hid ?: return false
+        selectedPeerAddress = device.address
+        val requested = service.connect(device)
+        if (!requested) selectedPeerAddress = null
+        return requested
     }
 
-    /** Validates the WHOLE text before sending any key events. Call only on explicit user action. */
-    fun sendAscii(text: String): Boolean {
-        val service = hid ?: return false
-        val destination = peer ?: return false
-        if (!hasPermission() || state !is State.Connected) return false
-        val strokes = UsKeyboardReport.encode(text) ?: return false
-        for (stroke in strokes) {
-            if (!service.sendReport(destination, REPORT_ID, stroke)) return false
-            if (!service.sendReport(destination, REPORT_ID, byteArrayOf(0, 0, 0, 0, 0, 0, 0, 0))) {
-                return false
+    /**
+     * Send only after the user chooses the destination and confirms the outgoing text.
+     *
+     * Validates the complete string BEFORE the first report. Key-down / key-up are paced
+     * asynchronously so the UI stays responsive and hosts can detect each event.
+     * A successful return means reports were accepted by Android, not that the remote
+     * text field is guaranteed to contain the exact characters.
+     */
+    suspend fun sendAscii(text: String): Boolean = sendMutex.withLock {
+        val strokes = UsKeyboardReport.encode(text) ?: return@withLock false
+        val service = hid ?: return@withLock false
+        val destination = peer ?: return@withLock false
+        if (!hasPermission() || state !is State.Connected ||
+            selectedPeerAddress != destination.address
+        ) return@withLock false
+        val release = ByteArray(8)
+        withContext(Dispatchers.IO) {
+            try {
+                for (stroke in strokes) {
+                    if (!hasPermission() || hid !== service ||
+                        peer?.address != destination.address ||
+                        state !is State.Connected
+                    ) return@withContext false
+                    if (!service.sendReport(destination, REPORT_ID, stroke)) {
+                        return@withContext false
+                    }
+                    delay(50L)
+                    if (!service.sendReport(destination, REPORT_ID, release)) {
+                        return@withContext false
+                    }
+                    delay(50L)
+                }
+                true
+            } finally {
+                // Always attempt key release, including on cancellation.
+                if (hasPermission()) {
+                    runCatching { service.sendReport(destination, REPORT_ID, release) }
+                }
             }
         }
-        return true
     }
 
     fun close() {
@@ -137,6 +192,7 @@ class BluetoothHidKeyboard(private val context: Context) {
             hid?.let { adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, it) }
         }
         peer = null
+        selectedPeerAddress = null
         hid = null
         state = State.Idle
     }
