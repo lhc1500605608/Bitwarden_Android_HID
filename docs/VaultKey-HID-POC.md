@@ -1,47 +1,57 @@
-# VaultKey Bluetooth HID proof of concept
+# VaultKey Bluetooth HID prototype (Android / K20 Pro)
 
-## Scope (milestone 1)
+## Current milestone: test a harmless Bluetooth HID keyboard
 
-This branch adds an **experimental transport layer only**. It does **not** send vault credentials and does **not** expose a Send Password button yet. There is intentionally no UI entry point until permission handling, HID registration, selection/confirmation flow, and reliable report pacing are validated. Do not interpret the presence of the transport class as a working password transmitter.
+This development branch contains a **debug-only**, separate launcher Activity named **VaultKey HID Test**. It does not read the vault and **cannot send real vault passwords** yet. The purpose is to verify Bluetooth HID hardware compatibility and host typing accuracy.
 
-Added:
-- `BluetoothHidKeyboard`: Android Bluetooth HID Device service wrapper.
-- `UsKeyboardReport`: printable US ASCII, Tab and Enter keyboard reports.
-- Manifest declaration for `BLUETOOTH_CONNECT`, which still requires **runtime permission**.
-- Pure mapping unit tests.
+Implemented:
+- Bluetooth HID Device registration through Android public APIs.
+- `BLUETOOTH_CONNECT` runtime permission requested by the debug-only test Activity.
+- Manual list of already paired/bonded devices and explicit Connect button.
+- An additional **Send** confirmation dialog before sending fixed test text.
+- US-layout ASCII keycode mapping (including Tab/Enter), with press/release pacing.
+- Cancellation handling / best-effort key release, and app cleanup.
+- Report encoding unit tests.
+- Independent GitHub Actions workflow `VaultKey Debug CI` that builds `standardDebug`.
 
-## Security boundaries
+The debug Activity uses the classic Android UI and is launched from a separate home-screen icon. Production release variants have neither this Activity nor its Bluetooth permission.
 
-- Never transmit credentials automatically when opening an item.
-- Restrict destinations to explicitly selected, bonded devices; verify the active connection before each operation.
-- Obtain confirmation before **every sensitive send**; ideally require device authentication.
-- No clipboard, analytics, logs, persistence or background queue for plaintext secrets.
-- Fail closed on unsupported characters: UTF-8/Unicode and non-US keyboard layouts are **not** supported.
-- HID keyboards cannot verify the remote website or focus; sender must check both.
-- The existing official Bitwarden encryption and lock policy must remain authoritative.
-- Rooted ROMs are for test data only until platform security is evaluated.
+## K20 Pro hardware test steps
 
-## Remaining work before first hardware test
+1. Go to the development PR's latest **VaultKey Debug CI** run. Download the **vaultkey-standard-debug-apk** artifact from the successful run, then unzip the artifact and install the APK on the K20 Pro. **Do not install a failed/partial build.**
+2. On the K20 Pro, turn Bluetooth on. In Android Bluetooth settings, pair the target PC or Mac if not already bonded. On the target, open a plain text editor, select a **US** keyboard layout, and focus a blank document.
+3. Launch **VaultKey HID Test** (a separate icon from the regular Bitwarden app).
+4. Tap **1. Start Bluetooth HID** and approve Android's Nearby devices permission. Wait until `HID ready`.
+5. Tap **2. Refresh paired devices**, choose the correct destination in the list.
+6. Tap **3. Connect selected device**, then wait for `Connected`. Some host Bluetooth stacks require connecting from the PC side; if it fails, inspect Bluetooth Settings on the target.
+7. Tap **4. Send harmless test text** and confirm the dialog. The fixed string is:
+   `VaultKey-Test Aa09 !@#-_=+`
+8. Compare the receiving text character-by-character. Check for dropped letters, wrong symbols, incorrect uppercase, and connection stability.
+9. Exit the test app. It unregisters the HID profile and releases resources.
 
-1. Add debug-only Compose screen/entry (outside the production vault actions).
-2. Request Bluetooth runtime permission; check adapter enabled and HID capability.
-3. Present bonded devices for explicit selection and show connection state.
-4. Queue reports with host-tested press/release pacing and connection cancellation. The current synchronous loop is **not production-safe** and may drop characters.
-5. Test US keyboard layout on paired target with harmless text (e.g. `Test-Aa09!@#`).
-6. Add explicit per-send consent, clean shutdown, and lifecycle tests.
-7. Only then link to the decrypted vault item field behind an explicit action and review.
+If the second launcher icon is missing, verify the APK is from **standardDebug**, not a production build or an older CI run.
 
-## Build notes
+## Boundaries and known limitations
 
-Upstream Bitwarden Android needs `user.properties` containing a GitHub classic PAT with `read:packages` to fetch Bitwarden SDK artifacts. **Never commit that file or the token.** See root README.
+- **Never use real account credentials** for this test; testing does not require logging in to Vaultwarden.
+- The test screen always sends fixed, non-sensitive text. No arbitrary textbox to avoid exposing pasted secrets in this stage.
+- The transport uses a US keyboard mapping; non-US host layouts can produce wrong symbols.
+- Successful `sendReport` means Android accepted the report; it does not prove the target typed every character.
+- Bluetooth HID profiles are system/vendor dependent; pairing on the phone as a keyboard is not always the same as HID Device mode being available to this app.
+- This is an experimental test harness. It needs further device security, lifecycle, disconnect, repeated send and UI testing before linking vault items.
+- A rooted phone or third-party ROM is acceptable for synthetic test data, not automatically a safe vault terminal.
+- USB HID is out of scope.
 
-Suggested local checks after SDK access is configured:
+## Building
+
+The fork requires access to the Bitwarden SDK artifacts in GitHub Packages. If CI reports a 401/403, configure Actions repository secret `BITWARDEN_PACKAGES_TOKEN` with a minimal Classic PAT with `read:packages`. Never commit or paste a token.
 
 ```bash
-./gradlew :app:testStandardDebugUnitTest --tests '*UsKeyboardReportTest'
-./gradlew :app:assembleStandardDebug
+./gradlew :app:testStandardDebugUnitTest --tests '*UsKeyboardReportTest' :app:assembleStandardDebug
 ```
 
-The repository was edited through GitHub tools; **neither Gradle build nor device testing has been run** in this environment. Verify task names with `./gradlew :app:tasks` if upstream variants differ.
+Workflow: `.github/workflows/vaultkey-debug.yml`. Only the successful **latest commit** build should be installed. Neither this branch nor its workflow publishes to Play Store.
 
-Target hardware: rooted K20 Pro running Android 16, Bluetooth HID already verified independently. USB HID is explicitly out of scope for milestone 1.
+## Next milestone (not implemented)
+
+After receiving verified K20 Pro typing results, review permission/connection lifecycle, keyboard layout handling, and add explicit per-send authentication and safe integration into decrypted login item actions. Keep secret material out of clipboard, logs and saved UI state.
