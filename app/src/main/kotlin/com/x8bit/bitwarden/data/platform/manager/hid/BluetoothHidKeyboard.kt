@@ -94,10 +94,12 @@ class BluetoothHidKeyboard(private val context: Context) {
             val service = proxy as BluetoothHidDevice
             hid = service
             val sdp = BluetoothHidDeviceAppSdpSettings(
-                "VaultKey Test Keyboard",
-                "Experimental HID keyboard (no clipboard)",
+                "VaultKey Keyboard V2",
+                "Keyboard-only HID descriptor; no mouse reports",
                 "VaultKey",
-                BluetoothHidDevice.SUBCLASS1_COMBO,
+                // Advertising a combo (keyboard + mouse) was inconsistent with our
+                // keyboard-only HID descriptor. Hosts may parse input as mouse reports.
+                BluetoothHidDevice.SUBCLASS1_KEYBOARD,
                 REPORT_DESCRIPTOR,
             )
             if (!service.registerApp(sdp, null as BluetoothHidDeviceAppQosSettings?,
@@ -198,11 +200,14 @@ class BluetoothHidKeyboard(private val context: Context) {
     }
 
     companion object {
-        private const val REPORT_ID = 1
+        // This descriptor does NOT declare a Report ID (0x85). Android's sendReport()
+        // therefore requires ID 0 and EXACTLY eight report bytes, with no ID prefix.
+        // This is a single, boot-style keyboard HID report (not a mouse or combo).
+        private const val REPORT_ID = 0
 
         // Keyboard input report: modifier, reserved, six key slots.
         private val REPORT_DESCRIPTOR = byteArrayOf(
-            0x05, 0x01, 0x09, 0x06, 0xA1.toByte(), 0x01, 0x85.toByte(), 0x01,
+            0x05, 0x01, 0x09, 0x06, 0xA1.toByte(), 0x01,
             0x05, 0x07, 0x19, 0xE0.toByte(), 0x29, 0xE7.toByte(), 0x15, 0x00,
             0x25, 0x01, 0x75, 0x01, 0x95.toByte(), 0x08, 0x81.toByte(), 0x02,
             0x95.toByte(), 0x01, 0x75, 0x08, 0x81.toByte(), 0x01,
@@ -213,7 +218,7 @@ class BluetoothHidKeyboard(private val context: Context) {
     }
 }
 
-/** Pure mapping: no Android or vault dependencies. Reports exclude the HID report ID. */
+/** Pure mapping: no Android or vault dependencies. Reports contain exactly 8 bytes. */
 internal object UsKeyboardReport {
     fun encode(text: String): List<ByteArray>? {
         val result = ArrayList<ByteArray>(text.length)
