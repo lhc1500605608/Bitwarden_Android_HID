@@ -17,7 +17,7 @@ class UsKeyboardReportTest {
 
     @Test
     fun `encodes symbols and tab`() {
-        val reports = requireNotNull(UsKeyboardReport.encode("!@\\t"))
+        val reports = requireNotNull(UsKeyboardReport.encode("!@\t"))
         assertEquals(3, reports.size)
         assertArrayEquals(byteArrayOf(2, 0, 0x1E, 0, 0, 0, 0, 0), reports[0])
         assertArrayEquals(byteArrayOf(2, 0, 0x1F, 0, 0, 0, 0, 0), reports[1])
