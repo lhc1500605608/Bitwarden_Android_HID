@@ -167,7 +167,7 @@ class VaultKeyHidTestActivity : Activity() {
             return
         }
         val actual = keyboard.refreshConnectionState()
-        statusText.text = when (actual) {
+        val stateLabel = when (actual) {
             BluetoothHidKeyboard.State.Idle -> "HID not registered."
             BluetoothHidKeyboard.State.Registering -> "Registering HID profile..."
             BluetoothHidKeyboard.State.Ready -> "No host selected. Select a host, then connect."
@@ -177,6 +177,7 @@ class VaultKeyHidTestActivity : Activity() {
                 "Android HID profile reports CONNECTED to " + actual.address
             is BluetoothHidKeyboard.State.Error -> "HID status: " + actual.reason
         }
+        statusText.text = stateLabel + "\n" + keyboard.diagnosticSummary()
     }
 
     private fun confirmSendTestText(textToSend: String) {
