@@ -65,6 +65,11 @@ class BluetoothHidKeyboard(private val context: Context) {
     private var selectedPeerAddress: String? = null
     @Volatile
     private var isRegistered = false
+    /** Non-sensitive control event name only, for debugging host HID compatibility. */
+    @Volatile
+    var lastHostControlRequest: String = "none"
+        private set
+
     private val executor = Executor { task -> mainHandler.post(task) }
 
     private val callback = object : BluetoothHidDevice.Callback() {
@@ -86,6 +91,42 @@ class BluetoothHidKeyboard(private val context: Context) {
                 State.Connected(selected.address)
             } else {
                 State.Ready
+            }
+        }
+
+        override fun onGetReport(
+            device: BluetoothDevice,
+            type: Byte,
+            id: Byte,
+            bufferSize: Int,
+        ) {
+            lastHostControlRequest = "GET_REPORT(type=${type.toInt()}, id=${id.toInt()})"
+            val service = hid ?: return
+            if (!hasPermission()) return
+            // When a host requests the current state of the keyboard, reply with
+            // an all-keys-released input report. No user or vault data is accessed.
+            if (type == BluetoothHidDevice.REPORT_TYPE_INPUT && id.toInt() == REPORT_ID) {
+                service.replyReport(device, type, id, ByteArray(8))
+            } else {
+                service.reportError(device, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
+            }
+        }
+
+        override fun onSetProtocol(device: BluetoothDevice, protocol: Byte) {
+            lastHostControlRequest = "SET_PROTOCOL(${protocol.toInt()})"
+            // Boot and Report protocols both use the same eight-byte keyboard input.
+        }
+
+        override fun onSetReport(
+            device: BluetoothDevice,
+            type: Byte,
+            id: Byte,
+            data: ByteArray,
+        ) {
+            lastHostControlRequest = "SET_REPORT(type=${type.toInt()}, id=${id.toInt()})"
+            // This descriptor has no output or feature reports: reject unsupported writes.
+            if (hasPermission()) {
+                hid?.reportError(device, BluetoothHidDevice.ERROR_RSP_UNSUPPORTED_REQ)
             }
         }
 
@@ -217,6 +258,24 @@ class BluetoothHidKeyboard(private val context: Context) {
                 }
             }
         }
+    }
+
+    /** Reports only profile/control metadata, never keystrokes or secrets. */
+    fun diagnosticSummary(): String {
+        val connection = selectedPeer?.let { device ->
+            if (hasPermission()) {
+                when (hid?.getConnectionState(device)) {
+                    BluetoothProfile.STATE_CONNECTED -> "CONNECTED"
+                    BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
+                    BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
+                    BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
+                    else -> "UNAVAILABLE"
+                }
+            } else {
+                "NO_PERMISSION"
+            }
+        } ?: "NO_HOST_SELECTED"
+        return "registered=$isRegistered, HID=$connection, lastHostRequest=$lastHostControlRequest"
     }
 
     /** Refresh the actual Bluetooth HID profile state without connecting a new host. */
