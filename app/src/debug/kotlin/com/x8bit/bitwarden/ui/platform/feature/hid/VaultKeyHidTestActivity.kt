@@ -30,6 +30,7 @@ class VaultKeyHidTestActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var peerSpinner: Spinner
     private lateinit var sendButton: Button
+    private lateinit var probeButton: Button
     private var devices: List<BluetoothDevice> = emptyList()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -51,8 +52,10 @@ class VaultKeyHidTestActivity : Activity() {
         })
         root.addView(TextView(this).apply {
             text = "Debug build only. Does not read or transmit any vault secrets. " +
-                "On the target device, open a plain text editor and focus a blank field. " +
-                "Use a US keyboard layout for this first test."
+                "Forget the previous Bluetooth pairing on BOTH devices, then pair again; " +
+                "the host may have cached an older mouse/keyboard descriptor. " +
+                "Open a blank text editor with the US keyboard layout and send only " +
+                "the single letter first."
             textSize = 15f
         })
         statusText = TextView(this).apply {
@@ -66,7 +69,13 @@ class VaultKeyHidTestActivity : Activity() {
         addButton(root, "1. Start Bluetooth HID") { startHid() }
         addButton(root, "2. Refresh paired devices") { refreshBondedDevices() }
         addButton(root, "3. Connect selected device") { connectSelectedDevice() }
-        sendButton = addButton(root, "4. Send harmless test text") { confirmSendTestText() }
+        probeButton = addButton(root, "4. Send one letter: a") {
+            confirmSendTestText("a")
+        }
+        probeButton.isEnabled = false
+        sendButton = addButton(root, "5. Send full test text") {
+            confirmSendTestText(TEST_TEXT)
+        }
         sendButton.isEnabled = false
         root.addView(TextView(this).apply {
             text = "Test: " + TEST_TEXT +
@@ -91,6 +100,7 @@ class VaultKeyHidTestActivity : Activity() {
                     is BluetoothHidKeyboard.State.Error -> "Error: " + state.reason
                 }
                 sendButton.isEnabled = state is BluetoothHidKeyboard.State.Connected
+                probeButton.isEnabled = sendButton.isEnabled
             }
         }
     }
@@ -146,7 +156,7 @@ class VaultKeyHidTestActivity : Activity() {
         }
     }
 
-    private fun confirmSendTestText() {
+    private fun confirmSendTestText(textToSend: String) {
         if (!::keyboard.isInitialized ||
             keyboard.state !is BluetoothHidKeyboard.State.Connected
         ) return
@@ -154,14 +164,15 @@ class VaultKeyHidTestActivity : Activity() {
             .setTitle("Send harmless test string?")
             .setMessage(
                 "Confirm the target device and focused text field. " +
-                    "This will type: " + TEST_TEXT,
+                    "This will type: " + textToSend,
             )
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Send") { _, _ ->
                 sendButton.isEnabled = false
+                probeButton.isEnabled = false
                 scope.launch {
                     try {
-                        val accepted = keyboard.sendAscii(TEST_TEXT)
+                        val accepted = keyboard.sendAscii(textToSend)
                         statusText.text = if (accepted) {
                             "Key reports sent. Verify the exact text on the target."
                         } else {
@@ -172,6 +183,7 @@ class VaultKeyHidTestActivity : Activity() {
                     } finally {
                         sendButton.isEnabled =
                             keyboard.state is BluetoothHidKeyboard.State.Connected
+                        probeButton.isEnabled = sendButton.isEnabled
                     }
                 }
             }
