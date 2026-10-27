@@ -31,6 +31,31 @@ The debug Activity uses the classic Android UI and is launched from a separate h
 
 If the second launcher icon is missing, verify the APK is from **standardDebug**, not a production build or an older CI run.
 
+## iQOO 13 (Android 16) — computer stuck at Connecting
+
+Confirmed by the tester: iQOO 13 -> iPhone receives and types test text correctly, but a computer remains at `Connecting` after re-pairing.
+
+This isolates the issue to a **host-specific connection / HID profile negotiation path**, not necessarily the phone's radio and not the ASCII keyboard mapping.
+
+### Diagnostic build changes
+
+- Android HID's `connect(device)` return is only request acceptance, **not connection success**. The test screen now displays the actual HID profile states and an explicit `Check HID connection status` button.
+- If the host connected first during Bluetooth pairing, tapping `Connect selected device` **adopts an already-established Bluetooth HID connection** only after the user explicitly selects that bonded host. Incoming hosts are never implicitly authorized to receive text.
+- Handle HID `GET_REPORT` (input report ID 0) with an all-keys-released 8-byte reply. Unsupported report writes return an unsupported-request handshake.
+- `Check HID connection status` shows `registered=true/false`, real `HID=CONNECTED/CONNECTING/DISCONNECTED`, and the last **non-sensitive HID control request name only**. No keys, account data, or passwords are logged.
+
+### Testing
+
+1. Install the APK from the **latest successful CI commit**.
+2. Open VaultKey HID Test on the iQOO 13, start HID and permit Nearby Devices access.
+3. Refresh bonded devices, choose the correct computer and tap **Connect selected device** once. The computer may have already connected during pairing.
+4. If the phone appears to hang, tap **4. Check HID connection status**. Report the text shown there and the *computer operating system* (Windows 10/11, macOS, or Linux), and specify whether "Connecting" was displayed on the computer or inside the VaultKey app.
+5. If it says `HID=CONNECTED`, test single letter `a` inside a blank editor; if the computer is still pairing, wait for system pairing to complete first.
+6. If `HID=CONNECTING` or `DISCONNECTED`, do not send text; the computer's host HID profile is not ready. Consider disabling/re-enabling Bluetooth on each side and re-pair **once** if the host holds on to its old descriptor, not repeatedly.
+7. If Windows keeps failing while the iPhone works, investigate HIDP host driver/controller behavior and any `GET_REPORT`, `SET_PROTOCOL`, or `SET_REPORT` requests indicated by the diagnostics.
+
+Not yet validated on the user's machine. Do not send production passwords. An iPhone success does not prove that every PC implementation accepts the same HID profile.
+
 ## Boundaries and known limitations
 
 - **Never use real account credentials** for this test; testing does not require logging in to Vaultwarden.
