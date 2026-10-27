@@ -37,6 +37,7 @@ class BluetoothHidKeyboard(private val context: Context) {
         data object Idle : State
         data object Registering : State
         data object Ready : State
+        data class Connecting(val address: String) : State
         data class Connected(val address: String) : State
         data class Error(val reason: String) : State
     }
@@ -60,26 +61,54 @@ class BluetoothHidKeyboard(private val context: Context) {
 
     private var hid: BluetoothHidDevice? = null
     private var peer: BluetoothDevice? = null
+    private var selectedPeer: BluetoothDevice? = null
     private var selectedPeerAddress: String? = null
+    @Volatile
+    private var isRegistered = false
     private val executor = Executor { task -> mainHandler.post(task) }
 
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
-            state = if (!registered) State.Idle else peer?.let {
-                State.Connected(it.address)
-            } ?: State.Ready
+            isRegistered = registered
+            if (!registered) {
+                peer = null
+                state = State.Idle
+                return
+            }
+            // A host may initiate a connection during pairing or while the HID app registers.
+            // A virtual cable alone does not authorize sending. Only a previously selected
+            // host may become the active destination.
+            val selected = selectedPeer
+            state = if (selected != null &&
+                hid?.getConnectionState(selected) == BluetoothProfile.STATE_CONNECTED
+            ) {
+                peer = selected
+                State.Connected(selected.address)
+            } else {
+                State.Ready
+            }
         }
 
         override fun onConnectionStateChanged(device: BluetoothDevice, newState: Int) {
-            if (newState == BluetoothProfile.STATE_CONNECTED) {
-                // An incoming HID connection is never authorization to transmit.
-                if (device.address == selectedPeerAddress) {
+            // Unsolicited host connections must not become approved input destinations.
+            // The user can explicitly select an already-connected bonded host later.
+            if (device.address != selectedPeerAddress) return
+            when (newState) {
+                BluetoothProfile.STATE_CONNECTING -> {
+                    state = State.Connecting(device.address)
+                }
+                BluetoothProfile.STATE_CONNECTED -> {
                     peer = device
                     state = State.Connected(device.address)
                 }
-            } else if (peer?.address == device.address) {
-                peer = null
-                state = State.Ready
+                BluetoothProfile.STATE_DISCONNECTING -> {
+                    peer = null
+                    state = State.Connecting(device.address)
+                }
+                BluetoothProfile.STATE_DISCONNECTED -> {
+                    peer = null
+                    state = State.Error("Selected host disconnected or connection failed")
+                }
             }
         }
     }
@@ -112,6 +141,7 @@ class BluetoothHidKeyboard(private val context: Context) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 hid = null
                 peer = null
+                isRegistered = false
                 state = State.Idle
             }
         }
@@ -136,14 +166,80 @@ class BluetoothHidKeyboard(private val context: Context) {
     fun pairedDevices(): List<BluetoothDevice> =
         if (hasPermission()) adapter?.bondedDevices?.toList().orEmpty() else emptyList()
 
+    /**
+     * Selecting a bonded host is an explicit user action. This also adopts a HID connection
+     * the computer established first, which otherwise may never produce another CONNECTED
+     * callback when the user taps Connect.
+     */
     fun connect(device: BluetoothDevice): Boolean {
-        if (!hasPermission() || device.bondState != BluetoothDevice.BOND_BONDED) return false
-        if (state != State.Ready) return false
+        if (!hasPermission() || !isRegistered ||
+            device.bondState != BluetoothDevice.BOND_BONDED
+        ) return false
         val service = hid ?: return false
+        if (peer != null && peer?.address != device.address) {
+            state = State.Error("Disconnect the previous host before selecting another")
+            return false
+        }
+        selectedPeer = device
         selectedPeerAddress = device.address
-        val requested = service.connect(device)
-        if (!requested) selectedPeerAddress = null
-        return requested
+        return when (service.getConnectionState(device)) {
+            BluetoothProfile.STATE_CONNECTED -> {
+                peer = device
+                state = State.Connected(device.address)
+                true
+            }
+            BluetoothProfile.STATE_CONNECTING -> {
+                state = State.Connecting(device.address)
+                true
+            }
+            BluetoothProfile.STATE_DISCONNECTING -> {
+                state = State.Error("Host is disconnecting; try again after it disconnects")
+                false
+            }
+            else -> {
+                state = State.Connecting(device.address)
+                val accepted = service.connect(device)
+                if (!accepted) {
+                    // Connection can win a race with our query; check the actual profile
+                    // before calling the request a failure.
+                    if (service.getConnectionState(device) ==
+                        BluetoothProfile.STATE_CONNECTED
+                    ) {
+                        peer = device
+                        state = State.Connected(device.address)
+                        true
+                    } else {
+                        state = State.Error("HID connect command rejected by Bluetooth stack")
+                        false
+                    }
+                } else {
+                    true
+                }
+            }
+        }
+    }
+
+    /** Refresh the actual Bluetooth HID profile state without connecting a new host. */
+    fun refreshConnectionState(): State {
+        if (!hasPermission() || !isRegistered) return state
+        val device = selectedPeer ?: return state
+        val service = hid ?: return state
+        state = when (service.getConnectionState(device)) {
+            BluetoothProfile.STATE_CONNECTED -> {
+                peer = device
+                State.Connected(device.address)
+            }
+            BluetoothProfile.STATE_CONNECTING -> State.Connecting(device.address)
+            BluetoothProfile.STATE_DISCONNECTING -> {
+                peer = null
+                State.Error("Host is disconnecting")
+            }
+            else -> {
+                peer = null
+                State.Error("Bluetooth HID profile is disconnected (pairing alone is not HID)")
+            }
+        }
+        return state
     }
 
     /**
@@ -194,7 +290,9 @@ class BluetoothHidKeyboard(private val context: Context) {
             hid?.let { adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, it) }
         }
         peer = null
+        selectedPeer = null
         selectedPeerAddress = null
+        isRegistered = false
         hid = null
         state = State.Idle
     }
