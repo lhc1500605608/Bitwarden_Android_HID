@@ -2,6 +2,12 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Debug-only HID prototype; no added Bluetooth permission in release variants. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+
     <application tools:ignore="MissingApplicationIcon">
         <!-- Disable Crashlytics for debug builds -->
         <meta-data
