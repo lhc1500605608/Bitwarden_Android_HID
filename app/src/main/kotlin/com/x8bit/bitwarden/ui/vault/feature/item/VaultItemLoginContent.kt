@@ -127,22 +127,25 @@ fun VaultItemLoginContent(
             }
         }
 
-        // First vault-to-HID integration checkpoint: DEBUG only and USERNAME only.
-        // Password and TOTP HID actions stay disabled until per-send authentication
-        // and host/foreground safety gates are independently verified.
-        if (BuildConfig.DEBUG) {
-            loginItemState.username?.takeIf { it.isNotEmpty() }?.let { username ->
-                item(key = "vaultkeyHidUsername") {
-                    VaultKeyUsernameHidAction(
-                        vaultItemId = vaultItemId,
-                        username = username,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .standardHorizontalMargin()
-                            .padding(vertical = 8.dp, horizontal = 12.dp)
-                            .animateItem(),
-                    )
-                }
+        // DEBUG FUNCTION TEST ONLY. Authentication proof is implemented separately
+        // but deliberately deferred for ADB-based end-to-end testing. Never expose
+        // HID secret sending in release builds or bypass Bitwarden's field permissions.
+        if (BuildConfig.DEBUG && loginItemState.hasLoginCredentials) {
+            item(key = "vaultkeyHidDebug") {
+                VaultKeyUsernameHidAction(
+                    vaultItemId = vaultItemId,
+                    username = loginItemState.username,
+                    password = loginItemState.passwordData
+                        ?.takeIf { it.canViewPassword }
+                        ?.password,
+                    totpCodeItemData = loginItemState.totpCodeItemData
+                        ?.takeIf { loginItemState.canViewTotpCode },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .standardHorizontalMargin()
+                        .padding(vertical = 8.dp, horizontal = 12.dp)
+                        .animateItem(),
+                )
             }
         }
 
