@@ -30,7 +30,9 @@ class VaultKeyHidTestActivity : Activity() {
     private lateinit var statusText: TextView
     private lateinit var peerSpinner: Spinner
     private lateinit var sendButton: Button
+    private lateinit var ampersandButton: Button
     private lateinit var probeButton: Button
+    private lateinit var sendHintText: TextView
     private var devices: List<BluetoothDevice> = emptyList()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
@@ -66,7 +68,7 @@ class VaultKeyHidTestActivity : Activity() {
 
         peerSpinner = Spinner(this)
         root.addView(peerSpinner)
-        addButton(root, "1. Start Bluetooth HID") { startHid() }
+        addButton(root, "1. Start Bluetooth HID (safe to repeat)") { startHid() }
         addButton(root, "2. Refresh paired devices") { refreshBondedDevices() }
         addButton(root, "3. Connect selected device") { connectSelectedDevice() }
         addButton(root, "4. Check HID connection status") { checkHidConnection() }
@@ -78,10 +80,22 @@ class VaultKeyHidTestActivity : Activity() {
             confirmSendTestText(TEST_TEXT)
         }
         sendButton.isEnabled = false
+        ampersandButton = addButton(root, "7. Send 27-byte test (ending &)") {
+            confirmSendTestText(TEST_TEXT_WITH_AMPERSAND)
+        }
+        ampersandButton.isEnabled = false
+        sendHintText = TextView(this).apply {
+            text = "Sending unavailable: tap Start HID, select a paired host, " +
+                "and wait for Connected before using a test button."
+            textSize = 14f
+        }
+        root.addView(sendHintText)
         root.addView(TextView(this).apply {
-            text = "Test: " + TEST_TEXT +
-                "\nNo clipboard access. Bluetooth HID cannot validate where the host cursor is. " +
-                "This test interface is separate from your real Bitwarden vault."
+            text = "Baseline (26 bytes): " + TEST_TEXT +
+                "\nExtended (27 bytes): " + TEST_TEXT_WITH_AMPERSAND +
+                "\nUse a plain editor with ABC/US English input; non-English IMEs " +
+                "can transform punctuation and letters." +
+                "\nNo clipboard access. This is separate from the real Bitwarden vault."
             textSize = 14f
         })
 
@@ -93,9 +107,12 @@ class VaultKeyHidTestActivity : Activity() {
         keyboard.onStateChanged = { state ->
             runOnUiThread {
                 statusText.text = when (state) {
-                    BluetoothHidKeyboard.State.Idle -> "HID not registered."
-                    BluetoothHidKeyboard.State.Registering -> "Registering HID profile..."
-                    BluetoothHidKeyboard.State.Ready -> "HID ready; choose a paired target."
+                    BluetoothHidKeyboard.State.Idle ->
+                        "HID not registered. Enable Bluetooth and tap START if needed."
+                    BluetoothHidKeyboard.State.Registering ->
+                        "Registering HID profile. Repeated START is ignored while pending."
+                    BluetoothHidKeyboard.State.Ready ->
+                        "HID ready. Repeated START is safe; select and connect a paired target."
                     is BluetoothHidKeyboard.State.Connecting ->
                         "HID profile connecting to " + state.address +
                             ". If stuck, tap Check HID connection status."
@@ -105,6 +122,13 @@ class VaultKeyHidTestActivity : Activity() {
                 }
                 sendButton.isEnabled = state is BluetoothHidKeyboard.State.Connected
                 probeButton.isEnabled = sendButton.isEnabled
+                ampersandButton.isEnabled = sendButton.isEnabled
+                sendHintText.text = if (sendButton.isEnabled) {
+                    "Connected: focus the target editor and confirm each test send."
+                } else {
+                    "Sending unavailable until a paired host is connected. " +
+                        "Tap Start HID, Refresh, then Connect selected device."
+                }
             }
         }
     }
@@ -194,6 +218,7 @@ class VaultKeyHidTestActivity : Activity() {
             .setPositiveButton("Send") { _, _ ->
                 sendButton.isEnabled = false
                 probeButton.isEnabled = false
+                ampersandButton.isEnabled = false
                 scope.launch {
                     try {
                         val accepted = keyboard.sendAscii(textToSend)
@@ -208,6 +233,7 @@ class VaultKeyHidTestActivity : Activity() {
                         sendButton.isEnabled =
                             keyboard.state is BluetoothHidKeyboard.State.Connected
                         probeButton.isEnabled = sendButton.isEnabled
+                        ampersandButton.isEnabled = sendButton.isEnabled
                     }
                 }
             }
@@ -240,6 +266,9 @@ class VaultKeyHidTestActivity : Activity() {
 
     companion object {
         private const val BLUETOOTH_REQUEST = 9201
+        // Exactly 26 ASCII bytes; previous macOS report of a missing & was
+        // due to comparing against a 27-byte expectation not present in the APK.
         private const val TEST_TEXT = "VaultKey-Test Aa09 !@#-_=+"
+        private const val TEST_TEXT_WITH_AMPERSAND = TEST_TEXT + "&"
     }
 }
