@@ -349,7 +349,9 @@ class BluetoothHidKeyboard(private val context: Context) {
             ) {
                 peer = selected
                 state = State.Connected(selected.address)
-            } else if (state !is State.Connecting) {
+            } else if (state !is State.Connecting &&
+                state !is State.Disconnecting
+            ) {
                 state = State.Ready
             }
             return true
@@ -389,8 +391,15 @@ class BluetoothHidKeyboard(private val context: Context) {
         if (!hasPermission() || !isRegistered ||
             device.bondState != BluetoothDevice.BOND_BONDED
         ) return false
-        if (disconnectRequested) {
+        if (disconnectRequested || state is State.Disconnecting) {
             state = State.Error("Previous host is disconnecting; try again afterward")
+            return false
+        }
+        if (selectedPeerAddress != null &&
+            selectedPeerAddress != device.address &&
+            (state is State.Connecting || peer != null)
+        ) {
+            state = State.Error("Finish the previous host connection before switching devices")
             return false
         }
         val service = hid ?: return false
