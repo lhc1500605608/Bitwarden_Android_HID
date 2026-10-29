@@ -149,6 +149,79 @@ The test screen deliberately keeps Send disabled until a paired host is connecte
 - Repeated START after Bluetooth off/on **must still be validated on macOS and Android hardware**; the code fix and successful compilation alone cannot prove recovery on every vendor stack.
 - Loss of characters under long strings and Windows 11 HID compatibility remain separate tests.
 
+## Redmi K20 Pro / Android 17 field report — critical send interruption (2026-10-29)
+
+Tester: K20 Pro / raphael / SDK 37, Mac mini macOS 26.1, keyboard source ABC.
+CI baseline run `40809349392`, commit `7bcbbb9e`.
+
+### Verified working — no need to repeat whole baseline
+
+- 27-byte `VaultKey-Test Aa09 !@#-_=+&` sent and received byte-perfect for 10 consecutive sends.
+- Two quick taps on Send resulted in only one transmission.
+- Disconnect/reconnect: 9/10 exact (one real link dropout; recoverable).
+- No crashes reported; Bluetooth on/off START recovery already fixed.
+- Prior missing ampersand was an IME artefact; keep Mac ABC source and capture-focused Terminal.
+- One "connection failure" was an accidental selection of Bluetooth headphones rather than a HID host.
+
+### P0: screen-off partial send — mitigated, not atomic
+
+On the old build, locking the phone about half a second into the 27-character
+send produced 9/27, 10/27 or 0/27 characters, but the app misleadingly claimed
+all reports were sent. This is a blocker for real credentials.
+
+New transport behavior:
+- Acquire a **bounded partial CPU wake lock** during an active send (only Debug
+  manifest requests `android.permission.WAKE_LOCK`).
+- Explicitly abort the current send if the screen turns off or the Activity
+  leaves the foreground; each send is tied to an abort generation, so unlocking
+  cannot resume the previous partial transmission.
+- Require **actual HID CONNECTED**, registered profile, and foreground/unlocked
+  screen before first byte and during each key, with a final check.
+- Distinguish `NOT SENT`, `INCOMPLETE / UNKNOWN (n of total key presses submitted)`,
+  and `All key reports accepted by Android; verify receiving host`.
+- Put results in a separate status label, not the connection callback label.
+- Never auto-replay partial data. The receiving host must be checked and its
+  field **cleared manually** before a retry.
+
+Important: HID is not transactional; a partial password cannot be retracted.
+A CPU wake lock is not a screen-on lock and does not guarantee the OS keeps
+the HID profile alive. `sendReport()` acknowledgment is from Android,
+**not the Mac/PC**. Even full acceptance must be verified on the host before
+any real credential integration.
+
+### P1: connecting race and occasional genuine disconnect
+
+- No send is queued while `CONNECTING`. It is refused as `NOT_CONNECTED`.
+- If a confirmation dialog opened while connected but the Bluetooth state
+  changed before user confirmation, the result clearly shows `NOT SENT`
+  rather than silently doing nothing.
+- HID transition or registration loss invalidates the in-flight send;
+  reconnecting is **a new user action**; pending bytes are not replayed.
+- The single intermittent link failure (1/22 in baseline) remains a separate
+  stability observation. Don't claim it fixed without a new host trace.
+
+### Focused K20 Pro / Mac regression to run on new build
+
+1. Download the artifact from the **latest successful** `VaultKey Debug CI` run.
+   Keep Mac ABC / English active and Terminal capture focused; use a fresh
+   capture file for every test.
+2. Send the 27-byte test without locking (once). Expect byte-for-byte 27.
+3. Send while deliberately pressing the K20 power button after ~0.5s, repeat
+   three times. Expect **no false success**. The partial host output may still
+   contain a prefix, but the app must report `INCOMPLETE / UNKNOWN` and never
+   resume it after unlock.
+4. With the Mac receiving field manually cleared, reconnect and send once
+   after the interrupted test. Expect full 27 bytes. Do not allow any automatic
+   replay when the Activity resumes.
+5. After disconnect/reconnect, tap send while profile still reports
+   `CONNECTING`. Expect button disabled or an explicit `NOT SENT` result.
+6. Repeat manual disconnect and connect while idle; report only unexpected
+   registration resets. A disconnect that causes Android to unregister HID
+   requires START/REFRESH, but that is a secondary usability issue.
+
+No test needs actual Vaultwarden credentials. Never log credential text,
+full keystroke HID reports, or private unrelated logcat entries.
+
 ## Boundaries and known limitations
 
 - **Never use real account credentials** for this test; testing does not require logging in to Vaultwarden.
