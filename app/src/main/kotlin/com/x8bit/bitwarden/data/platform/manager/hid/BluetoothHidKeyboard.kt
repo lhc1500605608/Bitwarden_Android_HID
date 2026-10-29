@@ -618,6 +618,8 @@ class BluetoothHidKeyboard(private val context: Context) {
                 SendStatus.UNSUPPORTED_TEXT, 0, text.length,
             ).also { lastSendResult = it }
         val count = strokes.size
+        // Never report a previous send's result after cancellation of a new attempt.
+        lastSendResult = null
         val power = context.getSystemService(PowerManager::class.java)
         val service = hid
         val destination = peer
