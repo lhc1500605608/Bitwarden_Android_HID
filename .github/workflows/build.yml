@@ -1,10 +1,8 @@
 name: Build
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
-  push:
-    branches:
-      - main
-      - release/**/*
   workflow_dispatch:
     inputs:
       version-name:

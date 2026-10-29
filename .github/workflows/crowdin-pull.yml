@@ -1,12 +1,11 @@
 name: Cron / Crowdin Pull
 run-name: Crowdin Pull - ${{ github.event_name == 'workflow_dispatch' && 'Manual' || 'Scheduled' }}
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
   workflow_dispatch:
-  schedule:
-    # Run weekly on Sunday at 00:00 UTC
-    - cron: '0 0 * * 0'
-    
+
 permissions: {}
 
 jobs:

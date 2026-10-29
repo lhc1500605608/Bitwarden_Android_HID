@@ -4,9 +4,9 @@ run-name: Stale Issue Cleanup - ${{ inputs.run-mode || 'scheduled' }}
 # Labels required: stale, never-stale. Apply "never-stale" to the Renovate dependency
 # dashboard issue (#3306) and anything else that should never be swept.
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
-  schedule:
-    - cron: '15 7 * * *'
   workflow_dispatch:
     inputs:
       run-mode:

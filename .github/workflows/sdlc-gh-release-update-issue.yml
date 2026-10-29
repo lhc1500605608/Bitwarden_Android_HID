@@ -1,9 +1,9 @@
 name: SDLC / Update Linked Issues on Release
 run-name: ${{ inputs.dry-run && '(Dry Run) ' || '' }}Update Linked Issues on Release - ${{ github.event.release.name || inputs.release_url }}
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
-  release:
-    types: [published]
   workflow_dispatch:
     inputs:
       release_url:
