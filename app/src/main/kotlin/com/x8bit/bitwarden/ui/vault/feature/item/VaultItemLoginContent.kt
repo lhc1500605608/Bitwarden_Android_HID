@@ -50,6 +50,7 @@ private const val AUTH_CODE_SPACING_INTERVAL = 3
 @Suppress("LongMethod")
 @Composable
 fun VaultItemLoginContent(
+    vaultItemId: String,
     commonState: VaultItemState.ViewState.Content.Common,
     loginItemState: VaultItemState.ViewState.Content.ItemType.Login,
     vaultCommonItemTypeHandlers: VaultCommonItemTypeHandlers,
@@ -133,6 +134,7 @@ fun VaultItemLoginContent(
             loginItemState.username?.takeIf { it.isNotEmpty() }?.let { username ->
                 item(key = "vaultkeyHidUsername") {
                     VaultKeyUsernameHidAction(
+                        vaultItemId = vaultItemId,
                         username = username,
                         modifier = Modifier
                             .fillMaxWidth()
