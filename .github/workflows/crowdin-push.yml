@@ -1,11 +1,10 @@
 name: CI / Crowdin Push
 run-name: Crowdin Push - ${{ github.event_name == 'workflow_dispatch' && 'Manual' || 'CI' }}
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
   workflow_dispatch:
-  push:
-    branches:
-      - main
 
 jobs:
   crowdin-push:

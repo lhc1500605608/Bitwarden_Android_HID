@@ -1,14 +1,8 @@
 name: Test
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
-  push:
-    branches:
-      - main
-      - release/**/*
-  pull_request:
-    types: [opened, synchronize]
-  merge_group:
-    types: [checks_requested]
   workflow_dispatch:
 
 env:

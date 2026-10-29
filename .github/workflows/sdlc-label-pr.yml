@@ -1,8 +1,8 @@
 name: SDLC / Labeler
 run-name: Label PR ${{ github.event.pull_request.number || inputs.pr-number }}${{ github.event_name == 'workflow_dispatch' && format(' / mode "{0}" dry-run "{1}"', inputs.mode, inputs.dry-run) || '' }}
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
-  pull_request:
-    types: [opened, reopened, synchronize, labeled, unlabeled, edited]
   workflow_dispatch:
     inputs:
       pr-number:

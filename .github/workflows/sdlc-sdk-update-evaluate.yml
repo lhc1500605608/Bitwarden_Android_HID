@@ -1,8 +1,9 @@
 name: SDLC / SDK Update Evaluation
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
-  pull_request:
-    types: [opened, synchronize]
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number }}

@@ -1,9 +1,8 @@
 name: Cron / Sync Google Privileged Browsers List
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
-  schedule:
-    # Run weekly on Sunday at 00:00 UTC
-    - cron: '0 0 * * 0'
   workflow_dispatch:
 
 env:

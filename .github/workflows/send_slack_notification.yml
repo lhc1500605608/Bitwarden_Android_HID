@@ -1,5 +1,7 @@
 name: SDLC / Send Slack Notification On Merge
 
+# Fork maintenance: upstream automation is manual-only here.
+# VaultKey Debug CI remains the sole PR-triggered APK test workflow.
 on:
   workflow_dispatch:
     inputs:
@@ -7,9 +9,6 @@ on:
         description: "Commit SHA to build the test notification"
         required: true
         type: string
-  push:
-    branches:
-      - release/**/*
 
 permissions:
   contents: read
