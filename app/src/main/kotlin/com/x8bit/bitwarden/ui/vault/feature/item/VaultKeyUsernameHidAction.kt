@@ -2,6 +2,7 @@ package com.x8bit.bitwarden.ui.vault.feature.item
 
 import android.Manifest
 import android.bluetooth.BluetoothDevice
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +29,9 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.x8bit.bitwarden.data.platform.manager.hid.BluetoothHidKeyboard
+import com.x8bit.bitwarden.data.platform.manager.hid.HidOneShotVerification
+import com.x8bit.bitwarden.ui.platform.composition.LocalBiometricsManager
+import com.x8bit.bitwarden.ui.platform.manager.biometrics.BiometricsManager
 import kotlinx.coroutines.launch
 
 /**
@@ -39,21 +43,32 @@ import kotlinx.coroutines.launch
  */
 @Composable
 internal fun VaultKeyUsernameHidAction(
+    vaultItemId: String,
     username: String,
     modifier: Modifier = Modifier,
+    biometricsManager: BiometricsManager = LocalBiometricsManager.current,
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
-    val transport = remember(context) { BluetoothHidKeyboard(context.applicationContext) }
+    val transport = remember(context, vaultItemId) {
+        BluetoothHidKeyboard(context.applicationContext)
+    }
+    val verification = remember(vaultItemId) { HidOneShotVerification() }
+    // A late biometric callback must not grant access after navigation/disposal.
+    val mounted = remember(vaultItemId) { mutableStateOf(true) }
     val coroutineScope = rememberCoroutineScope()
-    var hidState by remember { mutableStateOf<BluetoothHidKeyboard.State>(BluetoothHidKeyboard.State.Idle) }
-    var pairedHosts by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
-    var selectedHost by remember { mutableStateOf<BluetoothDevice?>(null) }
-    var selectedHostLabel by remember { mutableStateOf<String?>(null) }
-    var showHostPicker by remember { mutableStateOf(false) }
-    var showSendConfirmation by remember { mutableStateOf(false) }
-    var sending by remember { mutableStateOf(false) }
-    var resultMessage by remember { mutableStateOf("Choose a paired computer or tablet first.") }
+    var hidState by remember(vaultItemId) {
+        mutableStateOf<BluetoothHidKeyboard.State>(BluetoothHidKeyboard.State.Idle)
+    }
+    var pairedHosts by remember(vaultItemId) { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
+    var selectedHost by remember(vaultItemId) { mutableStateOf<BluetoothDevice?>(null) }
+    var selectedHostLabel by remember(vaultItemId) { mutableStateOf<String?>(null) }
+    var showHostPicker by remember(vaultItemId) { mutableStateOf(false) }
+    var showSendConfirmation by remember(vaultItemId) { mutableStateOf(false) }
+    var sending by remember(vaultItemId) { mutableStateOf(false) }
+    var resultMessage by remember(vaultItemId) {
+        mutableStateOf("Choose a paired computer or tablet first.")
+    }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission(),
@@ -66,13 +81,17 @@ internal fun VaultKeyUsernameHidAction(
         }
     }
 
-    DisposableEffect(transport, lifecycleOwner) {
+    DisposableEffect(transport, lifecycleOwner, vaultItemId) {
+        mounted.value = true
         transport.onStateChanged = { hidState = it }
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> transport.setForegroundActive(true)
-                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP ->
+                Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
                     transport.setForegroundActive(false)
+                    verification.invalidate()
+                    showSendConfirmation = false
+                }
                 else -> Unit
             }
         }
@@ -81,6 +100,8 @@ internal fun VaultKeyUsernameHidAction(
             transport.setForegroundActive(true)
         }
         onDispose {
+            mounted.value = false
+            verification.invalidate()
             transport.setForegroundActive(false)
             lifecycleOwner.lifecycle.removeObserver(observer)
             transport.onStateChanged = null
@@ -98,6 +119,8 @@ internal fun VaultKeyUsernameHidAction(
                     } else {
                         transport.start()
                         pairedHosts = transport.pairedDevices()
+                        verification.invalidate()
+                        showSendConfirmation = false
                         selectedHost = null
                         selectedHostLabel = null
                         showHostPicker = true
@@ -107,11 +130,67 @@ internal fun VaultKeyUsernameHidAction(
                 Text("HID host")
             }
             Button(
-                enabled = !sending && username.isNotEmpty() &&
+                enabled = !sending && username.isNotEmpty() && vaultItemId.isNotBlank() &&
                     hidState is BluetoothHidKeyboard.State.Connected,
-                onClick = { showSendConfirmation = true },
+                onClick = {
+                    val target = selectedHost
+                    val actual = transport.state
+                    if (target == null || actual !is BluetoothHidKeyboard.State.Connected ||
+                        actual.address != target.address
+                    ) {
+                        resultMessage = "NOT SENT: selected HID host not connected."
+                        return@Button
+                    }
+                    if (!biometricsManager.isUserVerificationSupported) {
+                        resultMessage = "NOT SENT: strong biometrics/device credentials unavailable."
+                        return@Button
+                    }
+                    verification.invalidate()
+                    resultMessage = "Waiting for device identity verification."
+                    biometricsManager.promptUserVerification(
+                        onSuccess = {
+                            val stateNow = transport.state
+                            if (!mounted.value ||
+                                !lifecycleOwner.lifecycle.currentState.isAtLeast(
+                                    Lifecycle.State.RESUMED
+                                ) ||
+                                selectedHost?.address != target.address ||
+                                stateNow !is BluetoothHidKeyboard.State.Connected ||
+                                stateNow.address != target.address
+                            ) {
+                                verification.invalidate()
+                                resultMessage = "NOT SENT: page/host changed during verification."
+                            } else {
+                                verification.issue(
+                                    itemId = vaultItemId,
+                                    hostAddress = target.address,
+                                    field = HidOneShotVerification.Field.USERNAME,
+                                    nowElapsedMs = SystemClock.elapsedRealtime(),
+                                )
+                                showSendConfirmation = true
+                                resultMessage = "Verified. Confirm destination within 15 seconds."
+                            }
+                        },
+                        onCancel = {
+                            verification.invalidate()
+                            resultMessage = "NOT SENT: identity verification cancelled."
+                        },
+                        onLockOut = {
+                            verification.invalidate()
+                            resultMessage = "NOT SENT: identity verification locked out."
+                        },
+                        onError = {
+                            verification.invalidate()
+                            resultMessage = "NOT SENT: identity verification failed."
+                        },
+                        onNotSupported = {
+                            verification.invalidate()
+                            resultMessage = "NOT SENT: strong verification unavailable."
+                        },
+                    )
+                },
             ) {
-                Text("Send username")
+                Text("Verify + send username")
             }
         }
         Text(
@@ -161,6 +240,7 @@ internal fun VaultKeyUsernameHidAction(
                         hidState is BluetoothHidKeyboard.State.Ready,
                     onClick = {
                         val host = selectedHost ?: return@TextButton
+                        verification.invalidate()
                         resultMessage = if (transport.connect(host)) {
                             selectedHostLabel = if (transport.hasPermission()) {
                                 runCatching { host.name }.getOrNull() ?: host.address
@@ -181,8 +261,11 @@ internal fun VaultKeyUsernameHidAction(
 
     if (showSendConfirmation) {
         AlertDialog(
-            onDismissRequest = { showSendConfirmation = false },
-            title = { Text("Confirm HID username input") },
+            onDismissRequest = {
+                showSendConfirmation = false
+                verification.invalidate()
+            },
+            title = { Text("Confirm verified HID username input") },
             text = {
                 Text(
                     "Receiving host: " + (selectedHostLabel ?: "Unknown") +
@@ -196,10 +279,28 @@ internal fun VaultKeyUsernameHidAction(
                     onClick = {
                         showSendConfirmation = false
                         if (sending) return@TextButton
+                        val host = selectedHost
+                        if (host == null || !verification.consume(
+                                itemId = vaultItemId,
+                                hostAddress = host.address,
+                                field = HidOneShotVerification.Field.USERNAME,
+                                nowElapsedMs = SystemClock.elapsedRealtime(),
+                            )
+                        ) {
+                            resultMessage = "NOT SENT: verification expired or host/item changed."
+                            return@TextButton
+                        }
+                        if (!lifecycleOwner.lifecycle.currentState.isAtLeast(
+                                Lifecycle.State.RESUMED
+                            )
+                        ) {
+                            resultMessage = "NOT SENT: page is not foreground."
+                            return@TextButton
+                        }
                         sending = true
                         coroutineScope.launch {
                             try {
-                                // Actual Bluetooth profile state is rechecked at sendAscii().
+                                // Transport verifies the true Bluetooth profile at send time.
                                 resultMessage = transport.sendAscii(username).summary()
                             } catch (_: Exception) {
                                 resultMessage = "INCOMPLETE / UNKNOWN. Check receiving field."
@@ -211,7 +312,12 @@ internal fun VaultKeyUsernameHidAction(
                 ) { Text("Send once") }
             },
             dismissButton = {
-                TextButton(onClick = { showSendConfirmation = false }) { Text("Cancel") }
+                TextButton(
+                    onClick = {
+                        showSendConfirmation = false
+                        verification.invalidate()
+                    },
+                ) { Text("Cancel") }
             },
         )
     }
