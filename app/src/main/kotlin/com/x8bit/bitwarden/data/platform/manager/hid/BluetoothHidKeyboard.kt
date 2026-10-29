@@ -191,8 +191,9 @@ class BluetoothHidKeyboard(private val context: Context) {
                 BluetoothProfile.STATE_CONNECTING -> "CONNECTING"
                 BluetoothProfile.STATE_DISCONNECTING -> "DISCONNECTING"
                 BluetoothProfile.STATE_DISCONNECTED -> "DISCONNECTED"
-                else -> "UNKNOWN($newState)"
+                else -> "UNKNOWN"
             }
+            logEvent("event=connection_state state=$lastProfileTransition")
             // Unsolicited host connections must not become approved input destinations.
             // The user can explicitly select an already-connected bonded host later.
             if (device.address != selectedPeerAddress) return
@@ -319,9 +320,9 @@ class BluetoothHidKeyboard(private val context: Context) {
         if (isRegistered) {
             logEvent("event=start_already_registered")
             val selected = selectedPeer
-            val connected = selected != null &&
+            if (selected != null &&
                 hid?.getConnectionState(selected) == BluetoothProfile.STATE_CONNECTED
-            if (connected) {
+            ) {
                 peer = selected
                 state = State.Connected(selected.address)
             } else if (state !is State.Connecting) {
