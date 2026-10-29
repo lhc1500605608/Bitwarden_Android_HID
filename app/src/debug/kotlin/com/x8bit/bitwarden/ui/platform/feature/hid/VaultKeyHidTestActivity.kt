@@ -3,6 +3,10 @@ package com.x8bit.bitwarden.ui.platform.feature.hid
 import android.Manifest
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.bluetooth.BluetoothDevice
 import android.content.pm.PackageManager
 import android.os.Build
@@ -33,7 +37,22 @@ class VaultKeyHidTestActivity : Activity() {
     private lateinit var ampersandButton: Button
     private lateinit var probeButton: Button
     private lateinit var sendHintText: TextView
+    private lateinit var sendResultText: TextView
     private var devices: List<BluetoothDevice> = emptyList()
+    private var screenOffReceiverRegistered = false
+    private var sendInProgress = false
+    private val screenOffReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            if (intent?.action == Intent.ACTION_SCREEN_OFF && ::keyboard.isInitialized) {
+                // Screen lock may unregister the Bluetooth HID profile even with a CPU wake lock.
+                keyboard.abortActiveSend()
+                if (sendInProgress && ::sendResultText.isInitialized) {
+                    sendResultText.text =
+                        "Screen off during send: INCOMPLETE / UNKNOWN. Do not auto-retry."
+                }
+            }
+        }
+    }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -91,6 +110,11 @@ class VaultKeyHidTestActivity : Activity() {
             textSize = 14f
         }
         root.addView(sendHintText)
+        sendResultText = TextView(this).apply {
+            text = "No HID send attempted."
+            textSize = 15f
+        }
+        root.addView(sendResultText)
         root.addView(TextView(this).apply {
             text = "Baseline (26 bytes): " + TEST_TEXT +
                 "\nExtended (27 bytes): " + TEST_TEXT_WITH_AMPERSAND +
@@ -105,6 +129,8 @@ class VaultKeyHidTestActivity : Activity() {
             return
         }
         keyboard = BluetoothHidKeyboard(this)
+        registerReceiver(screenOffReceiver, IntentFilter(Intent.ACTION_SCREEN_OFF))
+        screenOffReceiverRegistered = true
         keyboard.onStateChanged = { state ->
             runOnUiThread {
                 statusText.text = when (state) {
@@ -236,9 +262,11 @@ class VaultKeyHidTestActivity : Activity() {
     }
 
     private fun confirmSendTestText(textToSend: String) {
-        if (!::keyboard.isInitialized ||
-            keyboard.state !is BluetoothHidKeyboard.State.Connected
-        ) return
+        if (!::keyboard.isInitialized) return
+        if (keyboard.state !is BluetoothHidKeyboard.State.Connected) {
+            sendResultText.text = "NOT SENT: HID must be CONNECTED (not CONNECTING)."
+            return
+        }
         AlertDialog.Builder(this)
             .setTitle("Send harmless test string?")
             .setMessage(
@@ -247,20 +275,23 @@ class VaultKeyHidTestActivity : Activity() {
             )
             .setNegativeButton("Cancel", null)
             .setPositiveButton("Send") { _, _ ->
+                sendInProgress = true
+                sendResultText.text = "Sending HID reports. Keep the phone unlocked and foreground."
                 sendButton.isEnabled = false
                 probeButton.isEnabled = false
                 ampersandButton.isEnabled = false
                 scope.launch {
                     try {
-                        val accepted = keyboard.sendAscii(textToSend)
-                        statusText.text = if (accepted) {
-                            "Key reports sent. Verify the exact text on the target."
-                        } else {
-                            "Send failed; check pairing and connection."
-                        }
+                        val outcome = keyboard.sendAscii(textToSend)
+                        // This stays separate from connection status callbacks, so a race
+                        // cannot overwrite failure with a stale 'Connected' label.
+                        sendResultText.text = outcome.summary()
                     } catch (exception: Exception) {
-                        statusText.text = "Send interrupted. Check connection."
+                        // All exceptions and partial sends are uncertain, never a success.
+                        sendResultText.text = keyboard.lastSendResult?.summary()
+                            ?: "INCOMPLETE / UNKNOWN: HID send interrupted. Do not auto-retry."
                     } finally {
+                        sendInProgress = false
                         sendButton.isEnabled =
                             keyboard.state is BluetoothHidKeyboard.State.Connected
                         probeButton.isEnabled = sendButton.isEnabled
@@ -269,6 +300,27 @@ class VaultKeyHidTestActivity : Activity() {
                 }
             }
             .show()
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::keyboard.isInitialized) {
+            keyboard.setForegroundActive(true)
+            if (!sendInProgress && ::sendResultText.isInitialized) {
+                keyboard.lastSendResult?.let { sendResultText.text = it.summary() }
+            }
+        }
+    }
+
+    override fun onPause() {
+        if (::keyboard.isInitialized) {
+            keyboard.setForegroundActive(false)
+            if (sendInProgress && ::sendResultText.isInitialized) {
+                sendResultText.text =
+                    "Activity paused during send: INCOMPLETE / UNKNOWN. Do not auto-retry."
+            }
+        }
+        super.onPause()
     }
 
     override fun onRequestPermissionsResult(
@@ -287,6 +339,11 @@ class VaultKeyHidTestActivity : Activity() {
     }
 
     override fun onDestroy() {
+        if (screenOffReceiverRegistered) {
+            unregisterReceiver(screenOffReceiver)
+            screenOffReceiverRegistered = false
+        }
+        if (::keyboard.isInitialized) keyboard.abortActiveSend()
         scope.cancel()
         if (::keyboard.isInitialized) {
             keyboard.onStateChanged = null
