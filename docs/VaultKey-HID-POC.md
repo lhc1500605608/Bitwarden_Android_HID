@@ -114,6 +114,41 @@ No requirement to Root the iQOO 13, install a proprietary Bluetooth driver,
 or factory-reset Windows. First troubleshoot the selected device and its
 Bluetooth host adapter. Do not uninstall unrelated keyboard devices.
 
+## Mac mini / Hermes test findings — 2026-10-29
+
+Observed on macOS:
+- `hidutil list` confirms the phone as Bluetooth **Usage Page 1 / Usage 6** (keyboard).
+- With Terminal actually in focus, a single `a` arrived byte-for-byte.
+- When Chinese Baidu Pinyin was enabled, the extended typing result was modified by IME composition. Switch input source to **ABC** and ensure Terminal is in front before comparing.
+- Bluetooth power-cycle: HID unregisters when Bluetooth is off, then can return to `Ready` when on. The previous implementation's unconditional `start()` made a second `registerApp()` request and could leave the app in Error until force-stop. This is fixed with proxy/registration gating and retryable proxy cleanup.
+
+### Exact expected test strings
+
+The **original** test constant is `VaultKey-Test Aa09 !@#-_=+` — exactly **26 ASCII bytes**, ending in `+`. It **never** contained an `&`. The "27 expected / 26 received" discrepancy is therefore not evidence of a dropped final report.
+
+The debug screen now has two distinct full-string buttons:
+- **Baseline (26):** `VaultKey-Test Aa09 !@#-_=+`
+- **Extended (27):** `VaultKey-Test Aa09 !@#-_=+&`
+
+The unit test verifies their lengths and the final shifted `&` HID usage. An accepted `sendReport` still does **not** guarantee the host editor received all bytes, so compare the Terminal output twice after switching to ABC.
+
+### Mac hardware regression sequence
+
+1. Install the **latest successful** `VaultKey Debug CI` artifact from this PR. Keep the app in the foreground.
+2. With Bluetooth on, tap **START**, confirm `HID ready`, then **START again**. It should remain usable, without registration failed.
+3. Select and connect Mac mini; bring a plain Terminal/editor window to the front; switch from Baidu Pinyin to **ABC / English**.
+4. Send single letter `a`. Then send baseline (26) and extended (27) *separately*. Verify the bytes and exact final `+` / `&` in the receiving file. Repeat twice.
+5. Toggle the phone's Bluetooth **off → on** while keeping the test app foreground. Observe the Ready transition. Tap **START** again, verify no registration failure, then reconnect and test `a`.
+6. Repeat the Bluetooth off/on cycle twice. If a failure occurs, the UI should show an actionable error and **START should be retryable** without killing the app. Note the debug diagnostics rather than leaking credentials.
+7. `adb logcat -s VaultKeyHID:I` shows only registration/proxy/connection lifecycle events for Debug builds. Never paste full unfiltered `logcat` into public issues; it may contain private information from other apps.
+
+The test screen deliberately keeps Send disabled until a paired host is connected and now explains the prerequisites adjacent to the buttons. The log contains **no typed characters, credentials or MAC addresses**. All this remains debug-only; the vault is not accessed.
+
+### What remains unverified
+
+- Repeated START after Bluetooth off/on **must still be validated on macOS and Android hardware**; the code fix and successful compilation alone cannot prove recovery on every vendor stack.
+- Loss of characters under long strings and Windows 11 HID compatibility remain separate tests.
+
 ## Boundaries and known limitations
 
 - **Never use real account credentials** for this test; testing does not require logging in to Vaultwarden.
