@@ -222,6 +222,60 @@ any real credential integration.
 No test needs actual Vaultwarden credentials. Never log credential text,
 full keystroke HID reports, or private unrelated logcat entries.
 
+## 2026-10-29: P0 acceptance and first real vault screen integration
+
+### Latest hardware acceptance (CI 40859778044, commit a844db1d)
+
+- Redmi K20 Pro (Android 17), Mac mini (macOS 26.1), keyboard layout ABC.
+- Screen-off mid-send ×3: host captured 9/27 each time; Android reported
+  `INCOMPLETE / UNKNOWN: 9 of 27 key presses accepted...`; no automatic resend.
+- Explicit reconnect after interruption ×3: 27/27 bytes each time.
+- Connecting-race test: two observed UI `CONNECTING` windows successfully sent
+  27/27, with no silent drops; actual Bluetooth HID state may have become
+  CONNECTED between UI rendering and the user confirmation/send call.
+- No crash in this test. One prior rare HID link dropout remains under observation.
+
+**Gate decision:** never queue a send while connecting. A send is accepted only
+when the actual Android HID Device profile reports `STATE_CONNECTED` on
+the selected device at the beginning of `sendAscii()`, and is checked again
+between keypresses. A stale UI `CONNECTING` text is not authoritative.
+
+### First login item integration checkpoint
+
+A DEBUG-only `VaultKey HID · Debug username integration` action now appears
+on a Bitwarden **Login** item's content screen when the item has a username.
+
+This uses the existing decrypted login UI data: no second vault, no clipboard,
+no Intent extra, no persistent plaintext state. The user must:
+
+1. Use a **throwaway test vault entry with a synthetic username**; do not use
+   real credentials or connect the test to a production Vaultwarden account yet.
+2. Install the newest successful `standardDebug` APK, log into that test vault,
+   open a Login item.
+3. In `VaultKey HID · Debug username integration`, tap **HID host**;
+   grant Nearby Devices permission if needed. START/registration is automatic,
+   but wait for the transport to become READY.
+4. Open **HID host** again if needed. Refresh the list, select the receiving
+   Mac/PC explicitly, and press **Connect selected host**.
+5. Focus an ABC/English text field on the receiving Mac/PC.
+6. Tap **Send username** and verify the **host name** in the confirmation
+   dialog. Confirm once. Compare target bytes with the known test username.
+7. Repeat with phone screen-off during input. The transport must stop and
+   show INCOMPLETE/UNKNOWN, with no replay. Clean the host field before
+   manually retrying.
+
+Password and TOTP HID actions are intentionally **not yet available**.
+Before enabling them: integrate on-device reauthentication at send time,
+recheck vault unlock and permissions, validate supported keyboard layout,
+keep the device/field confirmation, and test lock/cancel/race behavior with
+synthetic credentials. Never cache a real password in an ActivityResult,
+Intent, SavedStateHandle, clipboard or telemetry.
+
+The debug test launcher also registers the same system-wide HID profile.
+**Close the standalone HID test Activity before using this vault integration**
+to avoid a second `registerApp` competing with it. Debug-only bridge
+lifecycle automatically closes its HID proxy when the composable is disposed.
+
 ## Boundaries and known limitations
 
 - **Never use real account credentials** for this test; testing does not require logging in to Vaultwarden.
