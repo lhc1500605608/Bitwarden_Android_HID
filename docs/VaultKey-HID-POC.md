@@ -352,6 +352,66 @@ No PASSWORD or TOTP send button exists yet.
 biometric proof using only synthetic data. No real password or TOTP until
 the above controls and organization policy checks are reviewed and proven.
 
+## Current mode: DEBUG functional testing without biometric prompts
+
+**Temporary owner-requested decision (2026-10-29):** automated Android testing
+cannot use the phone fingerprint sensor or enter the owner's lock-screen PIN.
+Biometric/device-credential verification has already been tested successfully;
+temporarily make it **non-blocking in DEBUG builds** to finish HID field
+functionality. The `HidOneShotVerification` helper and its unit tests are
+retained for the security-hardening phase, but are not used by these debug
+functional send buttons.
+
+- The unlocked Bitwarden Login detail shows one **DEBUG FUNCTION TEST** section.
+- It offers `Send username`, `Send password`, `Send current TOTP` where
+  the field exists. Password is only offered if Bitwarden sets
+  `passwordData.canViewPassword`; TOTP is only offered if
+  `canViewTotpCode`. This is a transport test, **not permission bypass**.
+- Tapping send requires an active selected HID host, then an explicit target
+  confirmation, which an ADB test agent can click. There is **no device unlock
+  prompt** on this temporary flow. Never use real account credentials on this
+  build.
+- TOTP is read from the *latest* Compose state after the confirmation. It is
+  not allowed if fewer than 5 seconds remain or the value is not 6–8 digits.
+  The code is never logged or shown in the confirmation dialog. This is a
+  preliminary rollover check, **not** a final time-safe TOTP design.
+- Each send still uses the transport's no-queue, foreground, display-on,
+  actual-HID-CONNECTED and no-replay-on-interruption behavior.
+- Production/release builds never expose the actions because the UI call site
+  and the component both check `BuildConfig.DEBUG`.
+- Do not merge this test mode to production. Restore per-send reauthentication,
+  master-password reprompt as required, and an audited authorization boundary
+  before enabling real credentials.
+
+### Focused follow-up test using synthetic credentials
+
+Use a disposable test vault Login item only; set synthetic values such as
+username `testuser-synthetic-20261029xyz` and a unique **test-only**
+ASCII password (never reuse any real password). Configure a fake TOTP test
+secret if you want to validate rotating digits; never use an account's
+real TOTP seed.
+
+1. Install the latest successful `VaultKey Debug CI` APK and open the
+   test Login entry. Close the standalone HID test Activity first.
+2. Connect the Mac HID receiver using `HID host`.
+3. **Username:** send once; compare host capture exactly to the synthetic
+   username bytes.
+4. **Password:** send once; compare host capture exactly to the synthetic
+   password bytes, without screenshots/logs containing its content if you
+   later move to real credentials.
+5. **TOTP:** record the *test* code and time left in the app, confirm and
+   send while at least 5 seconds remain; compare exact 6–8 digits, and
+   test near-expiry to ensure fail-closed. No automatic resend across rollover.
+6. With each send button, verify the dialog identifies the selected host.
+   Disconnect Bluetooth before confirmation to ensure no queued text.
+7. Do one longer synthetic password send while immediately turning off the
+   screen; verify INCOMPLETE/UNKNOWN and no automatic replay. Manually clear
+   the receiving text field before a new attempt.
+
+Pending work: username + TAB + password sequential input, explicit target
+switching/reconnect tests, standard keyboard layout handling, password/TOTP
+security gate re-enablement, code near-expiry handling and release policy.
+
 ## Boundaries and known limitations
 
 - **Never use real account credentials** for this test; testing does not require logging in to Vaultwarden.
