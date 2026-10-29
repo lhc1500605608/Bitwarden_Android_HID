@@ -276,6 +276,82 @@ The debug test launcher also registers the same system-wide HID profile.
 to avoid a second `registerApp` competing with it. Debug-only bridge
 lifecycle automatically closes its HID proxy when the composable is disposed.
 
+## 2026-10-29: Vault username HID integration accepted; authentication gate prototype
+
+### Evidence from CI 40868327764 / commit 0796704a
+
+Mac mini with ABC keyboard input, `test1` Login entry, synthetic username `admin`:
+- **T1 PASS** — host byte capture `b'admin'` = expected 5 bytes, app reported all 5 reports accepted by Android.
+- **T2 PASS** — phone Bluetooth disabled, no confirmation or host bytes; after Bluetooth re-enabled, still no queued replay.
+- **T3 PASS** — pressing power immediately mid-send resulted in `b'admi'` (4/5), app reported `INCOMPLETE / UNKNOWN: 4 of 5`, host captured no replay after unlock.
+- Crash buffer 0. Earlier HID 27-byte and 26-byte synthetic tests already passed.
+- Because `admin` is only 5 bytes, optionally change the synthetic test username to
+  `testuser-synthetic-20261029xyz` to create a reliable interruption window.
+  This longer test is a **supplementary regression**, not a blocker for the auth prototype.
+
+### Security review: PASSWORD / TOTP must be gated separately
+
+The existing Bitwarden project provides `BiometricsManager.promptUserVerification()`
+using strong biometrics or device credentials, already used in the repository's
+FIDO2 user-verification path. Reuse it — do not build custom PIN or biometric UI.
+
+**Design, not yet enabling real secrets:**
+1. Open an already-unlocked Login item inside the normal Bitwarden UI. Never
+   export a decrypted item through an Intent, clipboard, or debug log.
+2. Manually select a bonded HID receiving host and confirm its identity.
+3. Choose the **field** to transmit; require a **fresh successful device user
+   verification on every send**, not merely an unlocked app.
+4. Issue an **in-memory, single-use, 15-second** verification grant scoped to
+   exact `vaultItemId + receivingHostAddress + fieldType` (USERNAME, PASSWORD,
+   or TOTP). No secret text or token is persisted. Reject expired, cancelled,
+   cross-host, cross-item, cross-field, or reused grants.
+5. After verification, present a second explicit **receiving host + focused
+   input field** confirmation. Consume the grant before invoking HID transport.
+   Transport still enforces foreground/screen, current HID connection and
+   no-replay rules.
+6. On vault lock/logout/account switch, item navigation, Activity pause,
+   host change, cancellation, or expiration, drop the authorization.
+7. When **password** is eventually enabled: only if the active item permits
+   viewing/copying its password (`passwordData.canViewPassword`); respect
+   organization/collection policies and vault reauthentication requirements.
+   Retrieve the password at the last possible moment from current unlocked
+   state; don't snapshot/store it in the authorization grant.
+8. When **TOTP** is eventually enabled: require `canViewTotpCode`, use a
+   **fresh code after confirmation** rather than holding a code across biometric
+   prompts. Reject a code near expiry if reliable validity information is
+   unavailable. Never send an old TOTP after reconnection.
+9. A biometric/device-credential verification is **not equivalent to Bitwarden
+   master-password reprompt** if a policy requires the master password. Those
+   policies must be separately honored before enabling PASSWORD/TOTP.
+
+**First implementation checkpoint:** DEBUG Login screen **username** action
+now runs the existing Bitwarden `promptUserVerification` before the explicit
+host confirmation. The authorization object `HidOneShotVerification` is
+tested for one-use, expiration, item/host/field isolation and invalidation.
+No PASSWORD or TOTP send button exists yet.
+
+### Focused auth proof to test
+
+1. Install the latest successful Debug CI APK. Use a throwaway vault Login
+   item with a synthetic username (optionally 30–40 ASCII characters).
+2. Connect the Mac HID host. Tap **Verify + send username**. Confirm Android's
+   system biometric/device-credential prompt is shown.
+3. **Cancel verification**: no send, 0 Mac bytes.
+4. **Approve verification**, check the host in the second dialog and confirm
+   within 15 seconds: username bytes must match exactly, once.
+5. **Wait over 15 seconds** after verifying, then confirm: 0 bytes, explicit
+   expiry message.
+6. **Cancel the second dialog**, then repeat: an old verification must not be
+   reusable; a new biometric prompt is required.
+7. **Disconnect, lock, background, or navigate to another Login item** during
+   verification: never use the old grant or auto-send.
+8. If strong biometrics/device credential verification is unavailable, the
+   feature must fail closed (not silently skip reauthentication).
+
+**Release criterion:** successful unit tests, app build and fresh hardware
+biometric proof using only synthetic data. No real password or TOTP until
+the above controls and organization policy checks are reviewed and proven.
+
 ## Boundaries and known limitations
 
 - **Never use real account credentials** for this test; testing does not require logging in to Vaultwarden.
