@@ -4,6 +4,8 @@
 
     <!-- Debug-only HID prototype; no added Bluetooth permission in release variants. -->
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Keep CPU awake for a bounded HID send; locking the display still aborts. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-feature
         android:name="android.hardware.bluetooth"
         android:required="false" />
