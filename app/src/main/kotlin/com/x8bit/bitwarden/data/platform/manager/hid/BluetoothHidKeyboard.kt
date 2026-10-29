@@ -10,6 +10,8 @@ import android.bluetooth.BluetoothManager
 import android.bluetooth.BluetoothProfile
 import android.content.Context
 import android.content.pm.PackageManager
+import android.content.pm.ApplicationInfo
+import android.util.Log
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
@@ -63,6 +65,11 @@ class BluetoothHidKeyboard(private val context: Context) {
     private var peer: BluetoothDevice? = null
     private var selectedPeer: BluetoothDevice? = null
     private var selectedPeerAddress: String? = null
+    // Track proxy acquisition and HID app registration separately. Calling start()
+    // again while either is already active must not issue a second registerApp().
+    private var proxyRequested = false
+    private var registrationPending = false
+    private var closed = false
     @Volatile
     private var isRegistered = false
     /** Non-sensitive control event name only, for debugging host HID compatibility. */
@@ -76,9 +83,19 @@ class BluetoothHidKeyboard(private val context: Context) {
 
     private val executor = Executor { task -> mainHandler.post(task) }
 
+    /** Debug-only structural diagnostics. No MAC addresses, user input or vault values. */
+    private fun logEvent(event: String) {
+        if ((context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0) {
+            Log.i("VaultKeyHID", event)
+        }
+    }
+
     private val callback = object : BluetoothHidDevice.Callback() {
         override fun onAppStatusChanged(pluggedDevice: BluetoothDevice?, registered: Boolean) {
+            if (closed) return
+            registrationPending = false
             isRegistered = registered
+            logEvent(if (registered) "event=registration_confirmed" else "event=registration_removed")
             if (!registered) {
                 peer = null
                 state = State.Idle
@@ -202,33 +219,31 @@ class BluetoothHidKeyboard(private val context: Context) {
     private val serviceListener = object : BluetoothProfile.ServiceListener {
         override fun onServiceConnected(profile: Int, proxy: BluetoothProfile) {
             if (profile != BluetoothProfile.HID_DEVICE) return
+            if (closed || !proxyRequested) {
+                // A late service callback must not resurrect a closed transport.
+                runCatching { adapter?.closeProfileProxy(profile, proxy) }
+                return
+            }
+            logEvent("event=proxy_connected")
+            val service = proxy as BluetoothHidDevice
+            hid = service
             if (!hasPermission()) {
+                registrationPending = false
                 state = State.Error("Bluetooth permission missing")
                 return
             }
-            val service = proxy as BluetoothHidDevice
-            hid = service
-            val sdp = BluetoothHidDeviceAppSdpSettings(
-                "VaultKey Keyboard V2",
-                "Keyboard-only HID descriptor; no mouse reports",
-                "VaultKey",
-                // Advertising a combo (keyboard + mouse) was inconsistent with our
-                // keyboard-only HID descriptor. Hosts may parse input as mouse reports.
-                BluetoothHidDevice.SUBCLASS1_KEYBOARD,
-                REPORT_DESCRIPTOR,
-            )
-            if (!service.registerApp(sdp, null as BluetoothHidDeviceAppQosSettings?,
-                    null as BluetoothHidDeviceAppQosSettings?, executor, callback)) {
-                state = State.Error("HID registration failed")
-            }
+            requestRegistration(service)
         }
 
         override fun onServiceDisconnected(profile: Int) {
             if (profile == BluetoothProfile.HID_DEVICE) {
+                logEvent("event=proxy_disconnected")
                 hid = null
                 peer = null
                 isRegistered = false
-                state = State.Idle
+                registrationPending = false
+                proxyRequested = false
+                if (!closed) state = State.Idle
             }
         }
     }
@@ -237,15 +252,103 @@ class BluetoothHidKeyboard(private val context: Context) {
         ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT) ==
             PackageManager.PERMISSION_GRANTED
 
-    /** Start after BLUETOOTH_CONNECT runtime permission has been granted. */
+    /**
+     * Request registration exactly once until the Android registration callback arrives.
+     * On immediate failure, close the stale profile proxy so Start can retry in-process.
+     */
+    private fun requestRegistration(service: BluetoothHidDevice): Boolean {
+        if (closed) return false
+        if (isRegistered || registrationPending) return true
+        if (!hasPermission() || adapter?.isEnabled != true) {
+            state = State.Error("Bluetooth is off or permission is missing")
+            return false
+        }
+        registrationPending = true
+        state = State.Registering
+        val sdp = BluetoothHidDeviceAppSdpSettings(
+            "VaultKey Keyboard V2",
+            "Keyboard-only HID descriptor; no mouse reports",
+            "VaultKey",
+            BluetoothHidDevice.SUBCLASS1_KEYBOARD,
+            REPORT_DESCRIPTOR,
+        )
+        logEvent("event=registration_requested")
+        val accepted = runCatching {
+            service.registerApp(
+                sdp,
+                null as BluetoothHidDeviceAppQosSettings?,
+                null as BluetoothHidDeviceAppQosSettings?,
+                executor,
+                callback,
+            )
+        }.getOrDefault(false)
+        if (!accepted) {
+            registrationPending = false
+            isRegistered = false
+            peer = null
+            logEvent("event=registration_rejected")
+            // Do not unregister here: a rejected request gives us no ownership of
+            // the system-wide HID registration. Just drop our proxy and retry later.
+            runCatching { adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, service) }
+            if (hid === service) hid = null
+            proxyRequested = false
+            state = State.Error("HID registration rejected. Check Bluetooth, then tap START to retry")
+        }
+        return accepted
+    }
+
+    /**
+     * Idempotent startup:
+     * - already registered: keep the current HID session;
+     * - proxy/registration pending: do not request it again;
+     * - callback says unregistered: register once using the existing proxy;
+     * - no live proxy: obtain one.
+     */
     fun start(): Boolean {
+        if (closed) return false
         if (!hasPermission()) {
             state = State.Error("Bluetooth permission missing")
             return false
         }
+        val bluetooth = adapter
+        if (bluetooth?.isEnabled != true) {
+            logEvent("event=start_bluetooth_off")
+            state = State.Error("Bluetooth is off. Enable Bluetooth, then tap START")
+            return false
+        }
+        if (isRegistered) {
+            logEvent("event=start_already_registered")
+            val selected = selectedPeer
+            val connected = selected != null &&
+                hid?.getConnectionState(selected) == BluetoothProfile.STATE_CONNECTED
+            if (connected) {
+                peer = selected
+                state = State.Connected(selected.address)
+            } else if (state !is State.Connecting) {
+                state = State.Ready
+            }
+            return true
+        }
+        if (registrationPending || (proxyRequested && hid == null)) {
+            logEvent("event=start_already_pending")
+            return true
+        }
+        hid?.let { existingProxy ->
+            logEvent("event=start_reuse_proxy")
+            return requestRegistration(existingProxy)
+        }
+        proxyRequested = true
         state = State.Registering
-        return adapter?.getProfileProxy(context, serviceListener, BluetoothProfile.HID_DEVICE)
-            ?: false.also { state = State.Error("Bluetooth adapter not available") }
+        logEvent("event=proxy_requested")
+        val requested = runCatching {
+            bluetooth.getProfileProxy(context, serviceListener, BluetoothProfile.HID_DEVICE)
+        }.getOrDefault(false)
+        if (!requested) {
+            proxyRequested = false
+            logEvent("event=proxy_request_failed")
+            state = State.Error("HID proxy unavailable. Check Bluetooth, then retry START")
+        }
+        return requested
     }
 
     /** Uses only already bonded devices. Never silently initiates pairing. */
@@ -390,14 +493,24 @@ class BluetoothHidKeyboard(private val context: Context) {
     }
 
     fun close() {
+        if (closed) return
+        closed = true
+        logEvent("event=transport_closed")
         if (hasPermission()) {
-            hid?.unregisterApp()
-            hid?.let { adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, it) }
+            // Only unregister if our request was accepted or the system confirmed it.
+            if (isRegistered || registrationPending) {
+                runCatching { hid?.unregisterApp() }
+            }
+            hid?.let {
+                runCatching { adapter?.closeProfileProxy(BluetoothProfile.HID_DEVICE, it) }
+            }
         }
         peer = null
         selectedPeer = null
         selectedPeerAddress = null
         isRegistered = false
+        registrationPending = false
+        proxyRequested = false
         hid = null
         state = State.Idle
     }
