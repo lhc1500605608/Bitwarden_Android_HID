@@ -282,6 +282,7 @@ fun VaultItemScreen(
     ) {
         VaultItemContent(
             viewState = state.viewState,
+            vaultItemId = state.vaultItemId,
             modifier = Modifier
                 .fillMaxSize(),
             vaultCommonItemTypeHandlers = remember(viewModel) {
@@ -387,6 +388,7 @@ private fun VaultItemDialogs(
 @Composable
 private fun VaultItemContent(
     viewState: VaultItemState.ViewState,
+    vaultItemId: String,
     vaultCommonItemTypeHandlers: VaultCommonItemTypeHandlers,
     vaultLoginItemTypeHandlers: VaultLoginItemTypeHandlers,
     vaultCardItemTypeHandlers: VaultCardItemTypeHandlers,
@@ -411,6 +413,7 @@ private fun VaultItemContent(
             when (viewState.type) {
                 is VaultItemState.ViewState.Content.ItemType.Login -> {
                     VaultItemLoginContent(
+                        vaultItemId = vaultItemId,
                         commonState = viewState.common,
                         loginItemState = viewState.type,
                         vaultCommonItemTypeHandlers = vaultCommonItemTypeHandlers,
