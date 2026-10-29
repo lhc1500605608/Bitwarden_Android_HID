@@ -71,16 +71,17 @@ class VaultKeyHidTestActivity : Activity() {
         addButton(root, "1. Start Bluetooth HID (safe to repeat)") { startHid() }
         addButton(root, "2. Refresh paired devices") { refreshBondedDevices() }
         addButton(root, "3. Connect selected device") { connectSelectedDevice() }
-        addButton(root, "4. Check HID connection status") { checkHidConnection() }
-        probeButton = addButton(root, "5. Send one letter: a") {
+        addButton(root, "4. Disconnect current HID host") { disconnectCurrentHost() }
+        addButton(root, "5. Check HID connection status") { checkHidConnection() }
+        probeButton = addButton(root, "6. Send one letter: a") {
             confirmSendTestText("a")
         }
         probeButton.isEnabled = false
-        sendButton = addButton(root, "6. Send full test text") {
+        sendButton = addButton(root, "7. Send full test text") {
             confirmSendTestText(TEST_TEXT)
         }
         sendButton.isEnabled = false
-        ampersandButton = addButton(root, "7. Send 27-byte test (ending &)") {
+        ampersandButton = addButton(root, "8. Send 27-byte test (ending &)") {
             confirmSendTestText(TEST_TEXT_WITH_AMPERSAND)
         }
         ampersandButton.isEnabled = false
@@ -116,6 +117,8 @@ class VaultKeyHidTestActivity : Activity() {
                     is BluetoothHidKeyboard.State.Connecting ->
                         "HID profile connecting to " + state.address +
                             ". If stuck, tap Check HID connection status."
+                    is BluetoothHidKeyboard.State.Disconnecting ->
+                        "Disconnecting selected HID host " + state.address + "..."
                     is BluetoothHidKeyboard.State.Connected ->
                         "Connected to " + state.address + ". Focus a blank field on the target."
                     is BluetoothHidKeyboard.State.Error -> "Error: " + state.reason
@@ -157,30 +160,56 @@ class VaultKeyHidTestActivity : Activity() {
             return
         }
         devices = keyboard.pairedDevices().sortedBy { it.name ?: it.address }
-        val choices = devices.map { device ->
+        // Index 0 is NOT a device. Never silently choose the first paired item:
+        // Bluetooth bonded lists can include headphones and other non-HID hosts.
+        val choices = listOf("Select a computer/tablet (nothing selected)") + devices.map { device ->
             (device.name ?: "Unnamed device") + " (" + device.address + ")"
         }
         peerSpinner.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_dropdown_item,
-            if (choices.isEmpty()) listOf("No paired devices") else choices,
+            choices,
         )
-        if (choices.isEmpty()) {
-            statusText.text = "Pair the computer or tablet in Android Bluetooth settings first."
+        peerSpinner.setSelection(0, false)
+        statusText.text = if (devices.isEmpty()) {
+            "No bonded devices. Pair a computer or tablet using Bluetooth settings."
+        } else {
+            "Choose the computer/tablet from the dropdown. Headphones are not HID hosts."
         }
     }
 
     private fun connectSelectedDevice() {
         if (!::keyboard.isInitialized) return
-        val device = devices.getOrNull(peerSpinner.selectedItemPosition)
+        // Spinner index 0 is an explicit placeholder, not the first paired device.
+        val device = devices.getOrNull(peerSpinner.selectedItemPosition - 1)
         if (device == null) {
-            statusText.text = "No paired device selected."
+            statusText.text = "No host selected. Open the dropdown and choose your computer."
             return
         }
-        // BluetoothHidKeyboard emits the true profile state: CONNECTING, CONNECTED or error.
-        // Do not overwrite its state callback with a speculative "Connecting" label.
-        if (!keyboard.connect(device)) {
-            statusText.text = "Connection request rejected. Tap Check HID connection status."
+        val hostLabel = (device.name ?: "Unnamed device") + " (" + device.address + ")"
+        AlertDialog.Builder(this)
+            .setTitle("Confirm keyboard destination")
+            .setMessage(
+                "Connect the HID keyboard to " + hostLabel + "? " +
+                    "Only select a computer or tablet capable of receiving keyboard input. " +
+                    "Do not choose headphones or audio devices.",
+            )
+            .setNegativeButton("Cancel", null)
+            .setPositiveButton("Connect") { _, _ ->
+                if (!keyboard.connect(device)) {
+                    statusText.text = "HID connection request rejected for " + hostLabel +
+                        ". Check the host type and HID connection status."
+                }
+            }
+            .show()
+    }
+
+    private fun disconnectCurrentHost() {
+        if (!::keyboard.isInitialized) return
+        val ok = keyboard.disconnectSelected()
+        if (!ok) {
+            statusText.text = "No active host to disconnect, or the HID stack rejected " +
+                "the request. Use Check HID connection status for details."
         }
     }
 
@@ -197,6 +226,8 @@ class VaultKeyHidTestActivity : Activity() {
             BluetoothHidKeyboard.State.Ready -> "No host selected. Select a host, then connect."
             is BluetoothHidKeyboard.State.Connecting ->
                 "Android HID profile reports CONNECTING to " + actual.address
+            is BluetoothHidKeyboard.State.Disconnecting ->
+                "Android HID profile reports DISCONNECTING from " + actual.address
             is BluetoothHidKeyboard.State.Connected ->
                 "Android HID profile reports CONNECTED to " + actual.address
             is BluetoothHidKeyboard.State.Error -> "HID status: " + actual.reason
