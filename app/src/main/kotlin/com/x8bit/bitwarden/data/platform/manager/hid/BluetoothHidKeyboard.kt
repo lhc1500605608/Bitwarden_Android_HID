@@ -15,9 +15,11 @@ import android.util.Log
 import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import androidx.annotation.RequiresApi
 import androidx.core.content.ContextCompat
 import java.util.concurrent.Executor
+import java.util.concurrent.atomic.AtomicInteger
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.sync.Mutex
@@ -51,6 +53,56 @@ class BluetoothHidKeyboard(private val context: Context) {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val sendMutex = Mutex()
+    // Any lock, background transition or HID link change invalidates the current send.
+    // A generation counter prevents an immediate resume/reconnect from resuming old data.
+    private val sendAbortGeneration = AtomicInteger(0)
+    private val linkGeneration = AtomicInteger(0)
+    @Volatile
+    private var foregroundActive = false
+
+    enum class SendStatus {
+        REPORTS_ACCEPTED,
+        INCOMPLETE_OR_UNCERTAIN,
+        NOT_CONNECTED,
+        NOT_FOREGROUND,
+        UNSUPPORTED_TEXT,
+    }
+
+    data class SendResult(
+        val status: SendStatus,
+        val acceptedPresses: Int,
+        val totalPresses: Int,
+    ) {
+        /** This is not confirmation the host typed every character. */
+        val allReportsAccepted: Boolean get() = status == SendStatus.REPORTS_ACCEPTED
+        fun summary(): String = when (status) {
+            SendStatus.REPORTS_ACCEPTED ->
+                "All $totalPresses key reports accepted by Android; verify the receiving host."
+            SendStatus.INCOMPLETE_OR_UNCERTAIN ->
+                "INCOMPLETE / UNKNOWN: $acceptedPresses of $totalPresses key presses " +
+                    "accepted before interruption. Do not assume the host received them."
+            SendStatus.NOT_CONNECTED ->
+                "NOT SENT: Bluetooth HID is not fully CONNECTED."
+            SendStatus.NOT_FOREGROUND ->
+                "NOT SENT: phone locked, display off, or test Activity not foreground."
+            SendStatus.UNSUPPORTED_TEXT ->
+                "NOT SENT: character unsupported by US keyboard mapping."
+        }
+    }
+
+    @Volatile
+    var lastSendResult: SendResult? = null
+        private set
+
+    fun setForegroundActive(active: Boolean) {
+        foregroundActive = active
+        if (!active) abortActiveSend()
+    }
+
+    /** Cancel without retrying: keyboard HID cannot atomically roll back partial typing. */
+    fun abortActiveSend() {
+        sendAbortGeneration.incrementAndGet()
+    }
 
     @Volatile
     var state: State = State.Idle
@@ -99,6 +151,8 @@ class BluetoothHidKeyboard(private val context: Context) {
             isRegistered = registered
             logEvent(if (registered) "event=registration_confirmed" else "event=registration_removed")
             if (!registered) {
+                linkGeneration.incrementAndGet()
+                abortActiveSend()
                 peer = null
                 disconnectRequested = false
                 selectedPeer = null
@@ -185,6 +239,8 @@ class BluetoothHidKeyboard(private val context: Context) {
             lastHostControlRequest = "VIRTUAL_CABLE_UNPLUG"
             lastProfileTransition = "VirtualCableUnplug"
             if (device.address == selectedPeerAddress) {
+                linkGeneration.incrementAndGet()
+                abortActiveSend()
                 peer = null
                 selectedPeer = null
                 selectedPeerAddress = null
@@ -205,6 +261,8 @@ class BluetoothHidKeyboard(private val context: Context) {
             // Unsolicited host connections must not become approved input destinations.
             // The user can explicitly select an already-connected bonded host later.
             if (device.address != selectedPeerAddress) return
+            linkGeneration.incrementAndGet()
+            if (newState != BluetoothProfile.STATE_CONNECTED) abortActiveSend()
             when (newState) {
                 BluetoothProfile.STATE_CONNECTING -> {
                     if (!disconnectRequested) state = State.Connecting(device.address)
@@ -260,6 +318,8 @@ class BluetoothHidKeyboard(private val context: Context) {
         override fun onServiceDisconnected(profile: Int) {
             if (profile == BluetoothProfile.HID_DEVICE) {
                 logEvent("event=proxy_disconnected")
+                linkGeneration.incrementAndGet()
+                abortActiveSend()
                 hid = null
                 peer = null
                 selectedPeer = null
@@ -462,6 +522,7 @@ class BluetoothHidKeyboard(private val context: Context) {
      */
     fun disconnectSelected(): Boolean {
         if (!hasPermission() || !isRegistered) return false
+        abortActiveSend()
         val device = selectedPeer ?: return false
         val service = hid ?: return false
         return when (service.getConnectionState(device)) {
@@ -544,49 +605,114 @@ class BluetoothHidKeyboard(private val context: Context) {
     }
 
     /**
-     * Send only after the user chooses the destination and confirms the outgoing text.
+     * Fail closed on foreground loss, screen-off or HID state changes. A PARTIAL_WAKE_LOCK
+     * keeps the CPU executing while the screen is on; it does NOT keep the Android HID
+     * profile registered or prevent the hardware power button from turning off the screen.
      *
-     * Validates the complete string BEFORE the first report. Key-down / key-up are paced
-     * asynchronously so the UI stays responsive and hosts can detect each event.
-     * A successful return means reports were accepted by Android, not that the remote
-     * text field is guaranteed to contain the exact characters.
+     * HID sendReport returns "submitted to Android", not "received by the remote host".
+     * Never replay a partial send automatically: it could duplicate credential prefixes.
      */
-    suspend fun sendAscii(text: String): Boolean = sendMutex.withLock {
-        val strokes = UsKeyboardReport.encode(text) ?: return@withLock false
-        val service = hid ?: return@withLock false
-        val destination = peer ?: return@withLock false
-        if (!hasPermission() || state !is State.Connected ||
-            selectedPeerAddress != destination.address
-        ) return@withLock false
-        val release = ByteArray(8)
-        withContext(Dispatchers.IO) {
-            try {
+    suspend fun sendAscii(text: String): SendResult = sendMutex.withLock {
+        val strokes = UsKeyboardReport.encode(text)
+            ?: return@withLock SendResult(
+                SendStatus.UNSUPPORTED_TEXT, 0, text.length,
+            ).also { lastSendResult = it }
+        val count = strokes.size
+        val power = context.getSystemService(PowerManager::class.java)
+        val service = hid
+        val destination = peer
+        val initialAbort = sendAbortGeneration.get()
+        val initialLink = linkGeneration.get()
+
+        fun result(status: SendStatus, accepted: Int): SendResult =
+            SendResult(status, accepted, count).also {
+                lastSendResult = it
+                logEvent("event=send_result status=${status.name} accepted=$accepted total=$count")
+            }
+
+        // No background sending. Enforce actual Android HID profile status, not just
+        // a stale UI callback. Do not queue text while CONNECTING.
+        if (!foregroundActive || power?.isInteractive != true) {
+            return@withLock result(SendStatus.NOT_FOREGROUND, 0)
+        }
+        if (!hasPermission() || !isRegistered || service == null || destination == null ||
+            state !is State.Connected || selectedPeerAddress != destination.address ||
+            disconnectRequested ||
+            service.getConnectionState(destination) != BluetoothProfile.STATE_CONNECTED
+        ) {
+            return@withLock result(SendStatus.NOT_CONNECTED, 0)
+        }
+
+        // Test text is short; bound the awake period even if an Android callback hangs.
+        val timeoutMs = (count * 140L + 3000L).coerceIn(5000L, 60000L)
+        val wakeLock = power.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "VaultKey:HidSend")
+        val acquired = runCatching {
+            wakeLock.acquire(timeoutMs)
+            true
+        }.getOrDefault(false)
+        if (!acquired) return@withLock result(SendStatus.INCOMPLETE_OR_UNCERTAIN, 0)
+
+        var accepted = 0
+        var keyDown = false
+        val release = ByteArray(KEYBOARD_INPUT_BYTES)
+        try {
+            withContext(Dispatchers.IO) {
                 for (stroke in strokes) {
-                    if (!hasPermission() || hid !== service ||
-                        peer?.address != destination.address ||
-                        state !is State.Connected
-                    ) return@withContext false
-                    if (!service.sendReport(destination, REPORT_ID, stroke)) {
-                        return@withContext false
-                    }
+                    val valid = foregroundActive && power.isInteractive &&
+                        sendAbortGeneration.get() == initialAbort &&
+                        linkGeneration.get() == initialLink &&
+                        hasPermission() && isRegistered &&
+                        hid === service && peer?.address == destination.address &&
+                        state is State.Connected && !disconnectRequested &&
+                        service.getConnectionState(destination) == BluetoothProfile.STATE_CONNECTED
+                    if (!valid) return@withContext result(SendStatus.INCOMPLETE_OR_UNCERTAIN, accepted)
+
+                    // No plaintext or key report content is ever logged.
+                    val pressed = runCatching {
+                        service.sendReport(destination, REPORT_ID, stroke)
+                    }.getOrDefault(false)
+                    if (!pressed) return@withContext result(SendStatus.INCOMPLETE_OR_UNCERTAIN, accepted)
+                    accepted++
+                    keyDown = true
                     delay(50L)
-                    if (!service.sendReport(destination, REPORT_ID, release)) {
-                        return@withContext false
-                    }
+                    val released = runCatching {
+                        service.sendReport(destination, REPORT_ID, release)
+                    }.getOrDefault(false)
+                    if (!released) return@withContext result(SendStatus.INCOMPLETE_OR_UNCERTAIN, accepted)
+                    keyDown = false
                     delay(50L)
                 }
-                true
-            } finally {
-                // Always attempt key release, including on cancellation.
-                if (hasPermission()) {
-                    runCatching { service.sendReport(destination, REPORT_ID, release) }
+                // Final check matters: screen-off or disconnect can occur after last
+                // report was accepted but before the coroutine finishes.
+                if (!foregroundActive || !power.isInteractive ||
+                    sendAbortGeneration.get() != initialAbort ||
+                    linkGeneration.get() != initialLink ||
+                    !isRegistered || state !is State.Connected ||
+                    service.getConnectionState(destination) != BluetoothProfile.STATE_CONNECTED
+                ) {
+                    result(SendStatus.INCOMPLETE_OR_UNCERTAIN, accepted)
+                } else {
+                    result(SendStatus.REPORTS_ACCEPTED, accepted)
                 }
+            }
+        } finally {
+            // On cancellation or interruption, never leave a logical key held down.
+            if (keyDown && hasPermission()) {
+                runCatching { service.sendReport(destination, REPORT_ID, release) }
+            }
+            if (wakeLock.isHeld) runCatching { wakeLock.release() }
+            // The latest accepted count is retained even if the caller's Job was
+            // cancelled by Activity destruction.
+            if (lastSendResult == null) {
+                lastSendResult = SendResult(SendStatus.INCOMPLETE_OR_UNCERTAIN, accepted, count)
             }
         }
     }
 
     fun close() {
         if (closed) return
+        abortActiveSend()
+        foregroundActive = false
         closed = true
         logEvent("event=transport_closed")
         if (hasPermission()) {
