@@ -49,6 +49,7 @@ internal fun VaultKeyUsernameHidAction(
     var hidState by remember { mutableStateOf<BluetoothHidKeyboard.State>(BluetoothHidKeyboard.State.Idle) }
     var pairedHosts by remember { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
     var selectedHost by remember { mutableStateOf<BluetoothDevice?>(null) }
+    var selectedHostLabel by remember { mutableStateOf<String?>(null) }
     var showHostPicker by remember { mutableStateOf(false) }
     var showSendConfirmation by remember { mutableStateOf(false) }
     var sending by remember { mutableStateOf(false) }
@@ -98,6 +99,7 @@ internal fun VaultKeyUsernameHidAction(
                         transport.start()
                         pairedHosts = transport.pairedDevices()
                         selectedHost = null
+                        selectedHostLabel = null
                         showHostPicker = true
                     }
                 },
@@ -160,6 +162,9 @@ internal fun VaultKeyUsernameHidAction(
                     onClick = {
                         val host = selectedHost ?: return@TextButton
                         resultMessage = if (transport.connect(host)) {
+                            selectedHostLabel = if (transport.hasPermission()) {
+                                runCatching { host.name }.getOrNull() ?: host.address
+                            } else host.address
                             "HID connection requested. Wait for Connected before sending."
                         } else {
                             "HID connection rejected; check the chosen host and profile state."
@@ -180,7 +185,8 @@ internal fun VaultKeyUsernameHidAction(
             title = { Text("Confirm HID username input") },
             text = {
                 Text(
-                    "Check the selected receiving computer and the focused input field. " +
+                    "Receiving host: " + (selectedHostLabel ?: "Unknown") +
+                        ". Verify its focused input field before sending. " +
                         "A username may be private. No clipboard will be used. " +
                         "If the target is not CONNECTED at confirmation time, nothing is queued.",
                 )
