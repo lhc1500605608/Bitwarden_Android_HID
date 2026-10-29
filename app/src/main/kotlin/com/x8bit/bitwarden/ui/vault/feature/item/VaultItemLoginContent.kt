@@ -32,6 +32,7 @@ import com.bitwarden.ui.platform.components.text.BitwardenClickableText
 import com.bitwarden.ui.platform.resource.BitwardenDrawable
 import com.bitwarden.ui.platform.resource.BitwardenString
 import com.bitwarden.ui.platform.theme.BitwardenTheme
+import com.x8bit.bitwarden.BuildConfig
 import com.x8bit.bitwarden.ui.vault.feature.item.component.itemHeader
 import com.x8bit.bitwarden.ui.vault.feature.item.component.vaultItemAttachments
 import com.x8bit.bitwarden.ui.vault.feature.item.component.vaultItemCustomFields
@@ -122,6 +123,24 @@ fun VaultItemLoginContent(
                         .fillMaxWidth()
                         .animateItem(),
                 )
+            }
+        }
+
+        // First vault-to-HID integration checkpoint: DEBUG only and USERNAME only.
+        // Password and TOTP HID actions stay disabled until per-send authentication
+        // and host/foreground safety gates are independently verified.
+        if (BuildConfig.DEBUG) {
+            loginItemState.username?.takeIf { it.isNotEmpty() }?.let { username ->
+                item(key = "vaultkeyHidUsername") {
+                    VaultKeyUsernameHidAction(
+                        username = username,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .standardHorizontalMargin()
+                            .padding(vertical = 8.dp, horizontal = 12.dp)
+                            .animateItem(),
+                    )
+                }
             }
         }
 
