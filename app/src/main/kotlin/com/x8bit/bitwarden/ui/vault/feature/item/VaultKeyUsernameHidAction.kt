@@ -17,6 +17,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -36,6 +37,7 @@ import com.x8bit.bitwarden.ui.platform.composition.LocalBiometricsManager
 import com.x8bit.bitwarden.ui.platform.manager.biometrics.BiometricsManager
 import com.x8bit.bitwarden.ui.vault.feature.item.model.TotpCodeItemData
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.delay
 
 /**
  * Debug-only functional bridge from the unlocked Bitwarden Login item to Bluetooth HID.
@@ -43,7 +45,7 @@ import kotlinx.coroutines.launch
  * Requires a fresh Bitwarden biometric/device-credential user-verification
  * prompt for EACH send, followed by a second explicit receiving-host confirmation.
  * The grant is valid for only the selected vault item, Bluetooth host and HID
- * field; it expires after 15 seconds and is consumed before the send.
+ * field; it expires after 30 seconds and is consumed before the send.
  *
  * This stays DEBUG-only and must be exercised with SYNTHETIC vault data.
  * Device verification is not equivalent to a policy-required master-password
@@ -112,6 +114,7 @@ internal fun VaultKeyUsernameHidAction(
     var hostPickerOpen by remember(vaultItemId) { mutableStateOf(false) }
     // Only FIELD TYPE is retained in UI state, never credential text.
     var pendingField by remember(vaultItemId) { mutableStateOf<DebugHidField?>(null) }
+    var verificationExpiresAtMs by remember(vaultItemId) { mutableStateOf<Long?>(null) }
     var sending by remember(vaultItemId) { mutableStateOf(false) }
     var resultMessage by remember(vaultItemId) {
         mutableStateOf("DEBUG TEST ONLY — synthetic credentials; select a paired host.")
@@ -139,6 +142,7 @@ internal fun VaultKeyUsernameHidAction(
                 verificationEpoch++
                 verifying = false
                 pendingField = null
+                verificationExpiresAtMs = null
             }
         }
         val observer = LifecycleEventObserver { _, event ->
@@ -150,6 +154,7 @@ internal fun VaultKeyUsernameHidAction(
                     verificationEpoch++
                     verifying = false
                     pendingField = null
+                    verificationExpiresAtMs = null
                 }
                 else -> Unit
             }
@@ -164,6 +169,7 @@ internal fun VaultKeyUsernameHidAction(
             verificationEpoch++
             verifying = false
             pendingField = null
+            verificationExpiresAtMs = null
             transport.setForegroundActive(false)
             lifecycleOwner.lifecycle.removeObserver(observer)
             transport.onStateChanged = null
@@ -190,6 +196,7 @@ internal fun VaultKeyUsernameHidAction(
 
         verification.invalidate()
         pendingField = null
+        verificationExpiresAtMs = null
         verificationEpoch++
         val attempt = verificationEpoch
         verifying = true
@@ -199,6 +206,7 @@ internal fun VaultKeyUsernameHidAction(
             if (verificationEpoch == attempt && mounted.value) {
                 verification.invalidate()
                 pendingField = null
+                verificationExpiresAtMs = null
                 verifying = false
                 resultMessage = "NOT SENT: $reason"
             }
@@ -215,15 +223,17 @@ internal fun VaultKeyUsernameHidAction(
                     current is BluetoothHidKeyboard.State.Connected &&
                     current.address == host.address
                 ) {
+                    val verifiedAt = SystemClock.elapsedRealtime()
                     verification.issue(
                         itemId = vaultItemId,
                         hostAddress = host.address,
                         field = field.grantField,
-                        nowElapsedMs = SystemClock.elapsedRealtime(),
+                        nowElapsedMs = verifiedAt,
                     )
+                    verificationExpiresAtMs = verifiedAt + 30_000L
                     verifying = false
                     pendingField = field
-                    resultMessage = "Verified. Confirm selected host within 15 seconds."
+                    resultMessage = "Verified. Confirm selected host within 30 seconds."
                 } else {
                     reject("host, item, or foreground changed during verification.")
                 }
@@ -250,6 +260,7 @@ internal fun VaultKeyUsernameHidAction(
                     selectedHost = null
                     selectedHostLabel = null
                     pendingField = null
+                    verificationExpiresAtMs = null
                     hostPickerOpen = true
                 }
             },
@@ -315,6 +326,7 @@ internal fun VaultKeyUsernameHidAction(
                                 verificationEpoch++
                                 verifying = false
                                 pendingField = null
+                                verificationExpiresAtMs = null
                                 selectedHost = host
                                 selectedHostLabel = name?.takeIf { it.isNotBlank() } ?: host.address
                             },
@@ -339,6 +351,7 @@ internal fun VaultKeyUsernameHidAction(
                         verification.invalidate()
                         verificationEpoch++
                         verifying = false
+                        verificationExpiresAtMs = null
                         // Store the unformatted name/address, not "name (address)",
                         // so confirmation never repeats the Bluetooth address.
                         selectedHostLabel = if (transport.hasPermission()) {
@@ -361,19 +374,38 @@ internal fun VaultKeyUsernameHidAction(
         )
     }
 
+    // Expiry must dismiss the confirmation itself. Otherwise a stale dialog
+    // looks authorized and only fails after the user taps Send once.
+    LaunchedEffect(pendingField, verificationExpiresAtMs) {
+        val currentField = pendingField
+        val deadlineMs = verificationExpiresAtMs
+        if (currentField != null && deadlineMs != null) {
+            delay((deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
+            if (pendingField == currentField && verificationExpiresAtMs == deadlineMs) {
+                verification.invalidate()
+                verificationEpoch++
+                pendingField = null
+                verificationExpiresAtMs = null
+                resultMessage = "NOT SENT: verification expired. Verify device again."
+            }
+        }
+    }
+
     val field = pendingField
     if (field != null) {
         AlertDialog(
             onDismissRequest = {
                 pendingField = null
+                verificationExpiresAtMs = null
                 verification.invalidate()
+                verificationEpoch++
             },
             title = { Text("Confirm VERIFIED HID " + field.title + " send") },
             text = {
                 Text(
                     "Receiving host: " + selectedHostDisplayName() +
                         ". Confirm the focused field after device verification. " +
-                        "Authorization lasts 15 seconds, one send only. " +
+                        "Authorization lasts 30 seconds, one send only. " +
                         "DEBUG test credentials only; no automatic resend.",
                 )
             },
@@ -382,6 +414,7 @@ internal fun VaultKeyUsernameHidAction(
                     onClick = {
                         // Capture only the field kind here. Read actual data at send instant.
                         pendingField = null
+                        verificationExpiresAtMs = null
                         if (sending || verifying) {
                             verification.invalidate()
                             return@TextButton
@@ -463,7 +496,10 @@ internal fun VaultKeyUsernameHidAction(
                 TextButton(
                     onClick = {
                         pendingField = null
+                        verificationExpiresAtMs = null
                         verification.invalidate()
+                        verificationEpoch++
+                        resultMessage = "NOT SENT: confirmation cancelled. Verify again to send."
                     },
                 ) { Text("Cancel") }
             },
