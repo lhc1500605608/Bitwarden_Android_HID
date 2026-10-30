@@ -339,7 +339,13 @@ internal fun VaultKeyUsernameHidAction(
                         verification.invalidate()
                         verificationEpoch++
                         verifying = false
-                        selectedHostLabel = selectedHostDisplayName()
+                        // Store the unformatted name/address, not "name (address)",
+                        // so confirmation never repeats the Bluetooth address.
+                        selectedHostLabel = if (transport.hasPermission()) {
+                            runCatching { host.name }.getOrNull()
+                                ?.takeIf { it.isNotBlank() && it != "Unknown" }
+                                ?: host.address
+                        } else host.address
                         resultMessage = if (transport.connect(host)) {
                             "HID connecting; wait for Connected before sending."
                         } else {
