@@ -12,7 +12,7 @@ package com.x8bit.bitwarden.data.platform.manager.hid
 internal class HidOneShotVerification(
     private val validityMs: Long = 15_000L,
 ) {
-    enum class Field { USERNAME, PASSWORD, TOTP }
+    enum class Field { USERNAME, PASSWORD, TOTP, LOGIN_COMBINED }
 
     private data class Grant(
         val itemId: String,
