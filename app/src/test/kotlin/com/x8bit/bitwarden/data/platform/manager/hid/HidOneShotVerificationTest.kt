@@ -35,6 +35,41 @@ class HidOneShotVerificationTest {
     }
 
     @Test
+    fun `combined login grant cannot authorize password or username separately`() {
+        val gate = HidOneShotVerification()
+        gate.issue(
+            "item-1",
+            "host-a",
+            HidOneShotVerification.Field.LOGIN_COMBINED,
+            100L,
+        )
+        assertFalse(gate.consume(
+            "item-1",
+            "host-a",
+            HidOneShotVerification.Field.PASSWORD,
+            101L,
+        ))
+        assertFalse(gate.consume(
+            "item-1",
+            "host-a",
+            HidOneShotVerification.Field.LOGIN_COMBINED,
+            102L,
+        ))
+        gate.issue(
+            "item-1",
+            "host-a",
+            HidOneShotVerification.Field.LOGIN_COMBINED,
+            103L,
+        )
+        assertTrue(gate.consume(
+            "item-1",
+            "host-a",
+            HidOneShotVerification.Field.LOGIN_COMBINED,
+            104L,
+        ))
+    }
+
+    @Test
     fun `expired future and revoked grants are rejected`() {
         val gate = HidOneShotVerification(validityMs = 15_000L)
         gate.issue("item-1", "host-a", field, 100L)
