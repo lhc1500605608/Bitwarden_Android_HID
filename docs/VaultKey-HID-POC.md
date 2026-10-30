@@ -1,5 +1,78 @@
 # VaultKey Bluetooth HID prototype (Android / K20 Pro)
 
+## Current milestone — 2026-10-30 23:35 UTC+8: Lock/account races passed
+
+**Hardware accepted on Debug `cdd970f1` / CI `41070092372`:**
+
+- `probe` returned `status=ready, caller_uid=2000` through the
+  real ContentProvider Binder caller identity path.
+- **T2 PASS — lock before send**: after biometric success with confirmation
+  open, real `lock` returned `lock_requested`, receiving Mac captured
+  **0 bytes**; real vault locking/transport closure was observed.
+- **T3 PASS — lock during send**: real lock issued about 1.5 seconds after
+  combined send started; Mac captured 19 of 29 bytes, Android reported
+  `INCOMPLETE_OR_UNCERTAIN accepted=19 total=29`. No suffix appeared
+  after unlocking.
+- **T4 PASS — change active account**: real `switch_other` returned
+  `switched`, receiver captured 0 bytes, old transport closed and a
+  fresh system verification was required when returning to original entry.
+- No crashes. Other previously accepted HID/biometric tests **do not need
+  another full regression**.
+- **Item deletion and organization policy editing remain UNTESTED**.
+- The test-server DNS/sync condition is under the owner's independent
+  control; do NOT treat it as a VaultKey bug or debug it here.
+
+### Next code milestone: native master-password reprompt on protected entries
+
+A new DEBUG-only protected-item path is now **implemented but not yet
+compiled/verified on hardware**. It reuses the project's
+`BitwardenMasterPasswordDialog` and the same
+`AuthRepository.validatePassword` used by Bitwarden's credential paths.
+The former protected-item HID UI exclusion is removed **only for Debug**.
+
+For items with `CipherRepromptType.PASSWORD` and an existing unlocked
+test-vault session, a send attempt must follow:
+
+1. User taps an HID field action; Bitwarden master-password dialog opens.
+   The owner enters the master password **personally**. Agent automation
+   must NOT capture it, type it via ADB, log it or store it.
+2. Wrong password, error or dismissal: **0 host bytes**, no biometric
+   approval and no confirmation to the receiver.
+3. Successful native password validation: require **fresh platform device
+   verification**; the transient reprompt proof is scoped to selected
+   item/host/field and current callback epoch, not a reusable boolean.
+4. Require 30-second, one-use device-verification grant and final receiver
+   name/address confirmation. Read the current field only after confirmation.
+5. Revalidate active account, unlocked vault, protected-item status and
+   field permission before each key. Abort on lock, app background, profile
+   loss or account change. No automatic replay.
+6. Next send of the same or another field MUST prompt for master password
+   again. No master password or successful verification data is stored in
+   SavedStateHandle, Intent, clipboard, disk or logs.
+
+**Focused device test, using the existing synthetic
+`reprompt-hid-test` item:**
+- After Bitwarden's existing navigation master-password prompt, select
+  the HID host. Tap Send username or Send password and observe a
+  **new** master-password dialog dedicated to HID.
+- Cancel it: 0 bytes. Submit a deliberately incorrect master password
+  personally: 0 bytes and explicit failure.
+- Submit correct master password personally: system fingerprint dialog
+  must follow; cancel fingerprint: 0 bytes.
+- Approve the next complete pair of checks, confirm Mac and send a
+  synthetic field exactly once. Repeat: master prompt must appear again.
+- Revoke via real `lock` during or immediately after master validation,
+  or `switch_other`; the old attempt must fail closed.
+- If this cannot be demonstrated without inspecting the real master
+  password, stop that portion and mark it UNTESTED. Do not bypass the
+  master-password requirement for automation.
+
+Release remains disabled. Separate organizational permission audit,
+actual item-deletion test with disposable fixture, Release manifest/build
+verification and final security review remain open.
+
+---
+
 ## Debug-only Binder-protected vault lock/account-switch test control
 
 **2026-10-30: the previous BroadcastReceiver method is retired.** K20 Pro /
