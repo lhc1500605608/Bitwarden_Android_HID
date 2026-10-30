@@ -26,6 +26,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Enabled exclusively in Debug. Receiver checks the real sender UID
+             and accepts only the ADB shell UID on Android 14+; no fallback.
+             No intent filter: invoke by explicit component only. -->
+        <receiver
+            android:name=".ui.platform.feature.hid.VaultKeyDebugSessionReceiver"
+            android:exported="true" />
     </application>
 
 </manifest>
