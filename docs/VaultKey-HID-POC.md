@@ -1,5 +1,80 @@
 # VaultKey Bluetooth HID prototype (Android / K20 Pro)
 
+## Release security gate review — 2026-10-30
+
+**DEBUG transport functionality and on-device biometric tests have passed. This
+is NOT yet a release-ready credential transmitter.** Verified acceptance on
+CI `41013000270` / commit `375435dd` (K20 Pro Android 17 → Mac mini):
+system verification cancellation emitted 0 bytes; approval yielded correct
+29-byte username + Tab + synthetic-password stream and true focus transfer;
+15-second expiration blocked; cancel/navigation/host switch did not reuse
+a grant; screen-off stopped at 24/29 with INCOMPLETE/UNKNOWN and no replay;
+synthetic TOTP remained correct. Zero crashes.
+
+### Focused post-acceptance changes (pending new device proof)
+
+- Single-use authorization period extended **from 15 to 30 seconds** to allow
+  normal human confirmation. It still starts at **successful** device verification,
+  **not** when the system biometric prompt first appears; 30s affects only
+  the confirmation, not an in-progress HID transmission.
+- A timed effect automatically **closes and revokes** a pending confirmation
+  at expiry. The old behavior left a visually valid-looking dialog open until
+  clicking Send once returned an expiry error.
+- Cancelling a confirmation now invalidates the grant, closes the dialog,
+  invalidates prior callback generations and explicitly explains that a
+  new system verification is required. The old grant cannot be reused.
+- HID actions are **hidden for any item with** `CipherRepromptType.PASSWORD`,
+  or where the current cipher/reprompt status is unknown. This is
+  **fail-closed**, not master-password reprompt support.
+
+### Evidence from existing Bitwarden architecture
+
+- `VaultItemListingViewModel` already checks
+  `CipherRepromptType.PASSWORD` and calls
+  `authRepository.validatePassword` in sensitive credential-provider paths.
+  Our Login item's HID action is a separate export route and must not
+  assume the listing screen's prior reprompt covers it.
+- The Login UI provides `canViewPassword` and `canViewTotpCode` and the
+  active `currentCipher`. We now deny reprompt-protected items even if their
+  decrypted fields are visible.
+- `VaultLockManager.isVaultUnlocked(userId)` exists, but the current
+  debug HID action has **not** yet bound it to the active account at
+  confirmation and during transmission; this requires explicit implementation.
+- `BiometricsManager.promptUserVerification` reuses the system
+  biometric/device-credential prompt. A successful prompt is **not** proof
+  that a Bitwarden master-password reprompt has been satisfied.
+
+### REQUIRED before any Release enablement (unimplemented)
+
+1. Add a **vault session / identity gate**: capture item owner and active
+   account identity; at authorization issue, confirmation and every send,
+   require current active account matches, vault remains unlocked, and
+   item still exists/accessible. Fail closed on logout, account switch,
+   lock, item deletion or organization permission change. The transport
+   must abort immediately on vault-lock state changes, not just screen-off.
+2. Implement the native **master-password reprompt** path for
+   `CipherRepromptType.PASSWORD`; call the same repository validation
+   used in Bitwarden's protected credential paths. Strong biometric
+   alone does not override this requirement. Handle wrong password,
+   cancel and lockout without caching credentials.
+3. Review item/organization policy constraints beyond UI
+   `canViewPassword` and `canViewTotpCode`; recheck permissions against
+   the latest vault state at the last responsible moment.
+4. Reverify the intended host identity, US keyboard layout and focused
+   receiving field for sensitive fields; never infer bytes arrived
+   merely from Android accepting HID reports.
+5. Run automated negative cases: locked vault, account switch, protected
+   item reprompt, organization-managed restriction, host swap, screen
+   lock during multi-field input, unsupported characters, repeated sends,
+   and release variant without HID action/permissions.
+6. Remove test-only routes or explicitly feature-gate them. Review
+   release manifests, backup/clipboard/log surfaces and add a
+   `standardRelease` compile/build gate before a production launch.
+
+Do **not** remove the current Debug-only build fence or promote the PR.
+Keep using only the disposable test vault until the above is implemented
+and independently verified.
+
 ## CURRENT STATUS — 2026-10-30 (supersedes earlier milestone notes)
 
 **Functionality accepted:** Redmi K20 Pro Android 17 → macOS 26.1 with ABC
