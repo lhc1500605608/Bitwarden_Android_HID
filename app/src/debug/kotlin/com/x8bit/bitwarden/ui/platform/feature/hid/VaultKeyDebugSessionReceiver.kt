@@ -27,7 +27,7 @@ class VaultKeyDebugSessionReceiver : BroadcastReceiver() {
     @Inject lateinit var vaultLockManager: VaultLockManager
 
     override fun onReceive(context: Context, intent: Intent) {
-        val debuggable = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+        val debuggable = (context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE) != 0
         if (!debuggable || Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE ||
             getSentFromUid() != Process.SHELL_UID
         ) {
