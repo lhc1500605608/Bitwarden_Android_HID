@@ -1,87 +1,99 @@
 # VaultKey Bluetooth HID prototype (Android / K20 Pro)
 
-## Debug-only REAL vault lock/account-switch test control
+## Debug-only Binder-protected vault lock/account-switch test control
 
-To isolate a vault-lock or account-change event from the normal Compose
-navigation and modal dialog dismissal, the Debug APK now includes
-`VaultKeyDebugSessionReceiver`. **Not present in Release.** The receiver
-accepts explicit broadcasts ONLY from the real ADB shell UID (2000) on
-Android 14+, and rejects unverifiable sender identity. It does not
-manufacture a vault lock event, bypass login, change or expose passwords,
-or delete test entries.
+**2026-10-30: the previous BroadcastReceiver method is retired.** K20 Pro /
+KernelSU testing showed `am broadcast` can arrive with AMS
+`realCallingUid=2000` but `getSentFromUid()` is unavailable or does not
+represent the shell sender. Even `su 2000 -c 'am broadcast ...'` was rejected.
+This was correctly categorized as **TEST BLOCKED**, not an app vault-lock
+failure. The old receiver and manifest registration have been removed.
 
-Requires a trusted USB ADB connection and a successfully installed Debug APK.
-Check `adb shell id -u`: it should be `2000`; avoid root `su`.
-Do not include account IDs or passwords in commands or log output.
+The replacement is a **Debug-only exported ContentProvider**,
+`VaultKeyDebugSessionProvider`, with
+`content://com.x8bit.bitwarden.dev.vaultkeydebug`. It has no data
+query/update/insert/delete APIs. Its `call()` method immediately checks
+`Binder.getCallingUid() == Process.SHELL_UID (2000)`, Android 14+,
+and the APK's `FLAG_DEBUGGABLE`, before fetching Hilt dependencies
+through `EntryPointAccessors.fromApplication`. Non-shell callers, including
+root UID 0 and normal apps, are rejected; there is no fallback. The
+provider and its authority **do not exist in Release APKs**.
 
-### 1. Immediately lock the current vault (real Bitwarden state transition)
+On this KernelSU device, **`adb shell` is UID 0**, so invoke the
+command **as UID 2000**. Do not use `su` to run the test as root.
 
-```bash
-adb shell am broadcast \
-  -n com.x8bit.bitwarden.dev/com.x8bit.bitwarden.ui.platform.feature.hid.VaultKeyDebugSessionReceiver \
-  -a com.x8bit.bitwarden.dev.vaultkey.DEBUG_LOCK_VAULT
-```
-
-Receiver emits the non-sensitive log tag
-`VaultKeyHID: event=debug_real_lock_requested`. This proves the command
-was accepted, **not** yet that the HID output stopped. Capture actual
-lock state and receiving-host bytes separately. This invokes
-`VaultLockManager.lockVault(activeUserId, isUserInitiated=true)`
-and lets the regular Bitwarden lock state/event machinery run.
-
-### 2. Switch to another already logged-in account (real switch)
+### Non-destructive first check: Binder identity probe
 
 ```bash
-adb shell am broadcast \
-  -n com.x8bit.bitwarden.dev/com.x8bit.bitwarden.ui.platform.feature.hid.VaultKeyDebugSessionReceiver \
-  -a com.x8bit.bitwarden.dev.vaultkey.DEBUG_SWITCH_OTHER
+adb shell su 2000 -c 'content call --uri content://com.x8bit.bitwarden.dev.vaultkeydebug --method probe'
 ```
 
-This switches only to a **different, already logged-in** account via
-`AuthRepository.switchAccount`; no email or user ID extras are accepted.
-If no such account exists, it logs
-`event=debug_switch_no_other_logged_in_account` and changes nothing.
-The accepted path logs `event=debug_real_account_switch result=switched`.
-With exactly two logged-in accounts, sending it again should switch back,
-but verify the visible active account before resuming tests.
-Switching accounts can navigate/close the current screen: this is normal.
-Do not use real vault credentials while the debug probe is installed.
+Expected: Bundle result `status=ready, caller_uid=2000` and logcat
+`VaultKeyHID: event=debug_session_probe_ok uid=2000`. It changes no
+vault/account state. If it returns `status=rejected`, the log now
+includes the actual `uid`, `sdk`, and `debuggable` flags, without
+exposing any account identity. **Never relax the identity check to pass.**
+On a normal non-rooted phone where `adb shell id -u` is 2000,
+`adb shell content call ...` works without the `su 2000` wrapper.
 
-### Targeted negative tests (no re-run of HID baselines)
+### Real Bitwarden lock without leaving the modal
 
-- **T2 Lock after biometric success, before Send once:** Keep the target
-  confirmation open, deliver the lock broadcast from ADB. Expect the
-  real lock transition, no HID bytes and the old grant revoked. If the
-  modal is destroyed, report that explicitly rather than pretending a
-  confirmation button was tapped.
-- **T3 Lock during HID sending:** Start the synthetic 29-character combined
-  send and issue the lock broadcast while it is still transmitting (e.g.,
-  1–2 seconds into the ~4.8-second sequence). Expect a prefix only,
-  INCOMPLETE/UNKNOWN and **no replay** after unlocking. Log the exact lock
-  invocation timestamp relative to the first host key to establish
-  this really tested lock rather than UI backgrounding.
-- **T4 Switch active account during confirmation or input:** Deliver the
-  switch broadcast while the old item screen is active. Expect account
-  changed, old authorization revoked, 0 bytes if before Send once, or
-  partial/no replay if mid-send. Return to the original account by the
-  normal account selector or the same debug action and unlock manually.
-- **Item deletion/policy changes:** No destructive debug command is
-  provided. These remain **UNTESTED** until a safe non-destructive
-  controlled test fixture exists.
+```bash
+adb shell su 2000 -c 'content call --uri content://com.x8bit.bitwarden.dev.vaultkeydebug --method lock'
+```
 
-### Verify the probe is restricted
+Expected Bundle: `status=lock_requested, caller_uid=2000`.
+Logcat: `event=debug_real_lock_requested`. This invokes
+`VaultLockManager.lockVault(activeUserId, true)`, not a fabricated
+`VaultStateEvent.Locked`. This is **only an invocation acknowledgment**:
+inspect real vault locked state and Mac input bytes separately.
 
-A non-shell broadcasting app must not be allowed to lock or switch via
-this receiver. Log `event=debug_session_command_rejected` indicates
-a sender identity mismatch or unknown identity. Some vendor ROMs
-report `Process.INVALID_UID` for `am broadcast`; in that case the
-receiver must refuse the command. Mark that test **BLOCKED** and do not
-weaken the UID guard. A successful `am broadcast` command alone is
-not evidence the receiver performed the action.
+### Real account switch to another already logged-in account
 
-The receiving Mac still needs ABC keyboard layout and an active raw
-capture process. Never log sensitive keyboard payloads, user IDs,
-account email addresses, or vault secrets.
+```bash
+adb shell su 2000 -c 'content call --uri content://com.x8bit.bitwarden.dev.vaultkeydebug --method switch_other'
+```
+
+Expected Bundle: `status=switched`; logcat:
+`event=debug_real_account_switch result=switched`. The operation calls
+`AuthRepository.switchAccount(target.userId)`. The provider selects a
+different already logged-in account and accepts **no email/user ID extras**.
+If none is available, it returns `status=no_other_logged_in_account`.
+With two logged-in test accounts, the next invocation can reverse the
+switch; verify the active account before making that assumption.
+
+### Focused T2 / T3 / T4
+
+1. **Probe first.** Require `status=ready caller_uid=2000` before
+   beginning any destructive-to-session (but non-destructive-to-data)
+   test. Verify the Mac raw HID capture process is alive.
+2. **T2: lock after verification, before sending.** Keep the HID host
+   confirmation modal visible, issue `--method lock` from the shell.
+   Verify real vault lock, 0 bytes, revoked ticket. The modal may close
+   automatically; explicitly report that rather than claiming a
+   manual Send once click happened.
+3. Unlock and reopen the existing synthetic `test1` entry, reconnect
+   HID if necessary. **T3: begin 29-byte combination**, issue
+   `--method lock` about 1-2 seconds after the first host key, and
+   compare accepted presses with captured bytes. Expect only a prefix,
+   INCOMPLETE/UNKNOWN, no replay after unlocking. Distinguish lock
+   interruption from foreground loss using the command log timestamp.
+4. Unlock and restore test1. **T4: authenticate and leave the host
+   modal visible**, issue `--method switch_other`. Confirm that the
+   active account really changes and the old authorization cannot
+   transmit; Mac 0 bytes. Optionally perform a mid-send account switch
+   using the same command to verify prefix-only failure.
+5. **Item deletion and organization policy edits remain UNTESTED**:
+   no destructive debug methods are provided.
+
+The failed broadcast path is intentionally removed, including the
+old `VaultKeyDebugSessionReceiver` declaration. **Do not install or
+test older APK artifacts.** Check GitHub CI completes successfully,
+and use the latest matching commit SHA. Log `event=debug_session_command_rejected
+uid=<N> sdk=<N> debuggable=<true|false>` immediately diagnoses a
+rejected Binder call. No passwords, TOTP seeds, account IDs or plaintext
+HID reports are logged.
+
 
 ---
 
