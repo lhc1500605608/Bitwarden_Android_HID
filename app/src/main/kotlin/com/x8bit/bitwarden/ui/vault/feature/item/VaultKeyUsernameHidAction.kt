@@ -5,6 +5,7 @@ import android.bluetooth.BluetoothDevice
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -188,12 +189,18 @@ internal fun VaultKeyUsernameHidAction(
     // Reactive notification for account switches, vault locking and item
     // revocation. Independent synchronous checks below run at every HID key.
     LaunchedEffect(vaultItemId, expectedUserId, sessionGate) {
+        var previouslyAuthorized = false
         merge(
             sessionGate.userStateFlow.map { Unit },
             sessionGate.vaultStateEventFlow.map { Unit },
             sessionGate.itemStateFlow(vaultItemId).map { Unit },
         ).collect {
-            if (!sessionGate.isItemAvailable(expectedUserId, vaultItemId)) {
+            val vaultValid = sessionGate.isVaultSessionValid(expectedUserId)
+            val itemValid = sessionGate.isItemAvailable(expectedUserId, vaultItemId)
+            // The item StateFlow begins in Loading. That is not revocation
+            // until a previously available item actually disappears/changes.
+            if (itemValid) previouslyAuthorized = true
+            if (!vaultValid || (previouslyAuthorized && !itemValid)) {
                 sessionRevoked = true
                 verification.invalidate()
                 verificationEpoch++
@@ -210,8 +217,13 @@ internal fun VaultKeyUsernameHidAction(
         !sessionRevoked &&
             sessionGate.isFieldAllowed(expectedUserId, vaultItemId, field.grantField)
 
+    // A lazy vault item flow needs a Compose subscription so UI buttons
+    // re-evaluate when the item becomes available or permissions change.
+    val currentCipherState by sessionGate.itemStateFlow(vaultItemId)
+        .collectAsStateWithLifecycle()
     val connected = hidState is BluetoothHidKeyboard.State.Connected &&
         !sending && !verifying && !sessionRevoked &&
+        currentCipherState.data != null &&
         sessionGate.isItemAvailable(expectedUserId, vaultItemId)
     fun requestField(field: DebugHidField) {
         val host = selectedHost
