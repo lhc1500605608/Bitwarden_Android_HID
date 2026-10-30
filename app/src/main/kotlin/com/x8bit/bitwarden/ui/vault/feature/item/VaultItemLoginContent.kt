@@ -32,6 +32,7 @@ import com.bitwarden.ui.platform.components.text.BitwardenClickableText
 import com.bitwarden.ui.platform.resource.BitwardenDrawable
 import com.bitwarden.ui.platform.resource.BitwardenString
 import com.bitwarden.ui.platform.theme.BitwardenTheme
+import com.bitwarden.vault.CipherRepromptType
 import com.x8bit.bitwarden.BuildConfig
 import com.x8bit.bitwarden.ui.vault.feature.item.component.itemHeader
 import com.x8bit.bitwarden.ui.vault.feature.item.component.vaultItemAttachments
@@ -130,7 +131,15 @@ fun VaultItemLoginContent(
         // DEBUG FUNCTION TEST ONLY. Authentication proof is implemented separately
         // but deliberately deferred for ADB-based end-to-end testing. Never expose
         // HID secret sending in release builds or bypass Bitwarden's field permissions.
-        if (BuildConfig.DEBUG && loginItemState.hasLoginCredentials) {
+        // HID is an independent export path: do not bypass Bitwarden's existing
+        // master-password reprompt requirement by opening a Login detail directly.
+        // Until a real master-password reprompt is wired, refuse all HID fields
+        // for reprompt-protected items. Unknown cipher state also fails closed.
+        if (BuildConfig.DEBUG && loginItemState.hasLoginCredentials &&
+            commonState.currentCipher?.reprompt?.let {
+                it != CipherRepromptType.PASSWORD
+            } == true
+        ) {
             item(key = "vaultkeyHidDebug") {
                 VaultKeyUsernameHidAction(
                     vaultItemId = vaultItemId,
