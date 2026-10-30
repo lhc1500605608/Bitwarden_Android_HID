@@ -6,6 +6,7 @@ import com.bitwarden.vault.CipherView
 import com.bitwarden.vault.CipherRepromptType
 import com.bitwarden.vault.CipherType
 import com.x8bit.bitwarden.data.auth.repository.AuthRepository
+import com.x8bit.bitwarden.data.auth.repository.model.ValidatePasswordResult
 import com.x8bit.bitwarden.data.platform.manager.hid.HidOneShotVerification
 import com.x8bit.bitwarden.data.vault.manager.VaultLockManager
 import com.x8bit.bitwarden.data.vault.repository.VaultRepository
@@ -60,17 +61,47 @@ internal class VaultKeySessionGateViewModel @Inject constructor(
         if (!isVaultSessionValid(expectedUserId)) return false
         val cipher = itemStateFlow(itemId).value.data ?: return false
         return cipher.id == itemId &&
-            cipher.type == CipherType.LOGIN &&
-            cipher.reprompt != CipherRepromptType.PASSWORD
+            cipher.type == CipherType.LOGIN
+    }
+
+    fun requiresMasterPasswordReprompt(
+        expectedUserId: String?,
+        itemId: String,
+    ): Boolean? {
+        if (!isItemAvailable(expectedUserId, itemId)) return null
+        return itemStateFlow(itemId).value.data?.reprompt == CipherRepromptType.PASSWORD
+    }
+
+    /**
+     * Uses Bitwarden's same repository validation as the listing screen.
+     * The plaintext master password lives only in the caller's transient
+     * dialog callback and coroutine; no password or success flag is persisted.
+     */
+    suspend fun verifyMasterPasswordForHid(
+        expectedUserId: String?,
+        itemId: String,
+        masterPassword: String,
+    ): Boolean {
+        if (masterPassword.isEmpty() ||
+            requiresMasterPasswordReprompt(expectedUserId, itemId) != true ||
+            authRepository.userStateFlow.value?.activeAccount?.hasMasterPassword != true
+        ) return false
+        val outcome = authRepository.validatePassword(masterPassword)
+        return outcome is ValidatePasswordResult.Success && outcome.isValid &&
+            requiresMasterPasswordReprompt(expectedUserId, itemId) == true
     }
 
     fun isFieldAllowed(
         expectedUserId: String?,
         itemId: String,
         field: HidOneShotVerification.Field,
+        protectedItemRepromptVerified: Boolean = false,
     ): Boolean {
         if (!isItemAvailable(expectedUserId, itemId)) return false
         val cipher = itemStateFlow(itemId).value.data ?: return false
+        if (cipher.reprompt == CipherRepromptType.PASSWORD &&
+            !protectedItemRepromptVerified
+        ) return false
         val login = cipher.login ?: return false
         val account = authRepository.userStateFlow.value?.activeAccount ?: return false
         return when (field) {
