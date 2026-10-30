@@ -32,6 +32,7 @@ import com.bitwarden.ui.platform.components.text.BitwardenClickableText
 import com.bitwarden.ui.platform.resource.BitwardenDrawable
 import com.bitwarden.ui.platform.resource.BitwardenString
 import com.bitwarden.ui.platform.theme.BitwardenTheme
+import com.x8bit.bitwarden.BuildConfig
 import com.x8bit.bitwarden.ui.vault.feature.item.component.itemHeader
 import com.x8bit.bitwarden.ui.vault.feature.item.component.vaultItemAttachments
 import com.x8bit.bitwarden.ui.vault.feature.item.component.vaultItemCustomFields
@@ -49,6 +50,7 @@ private const val AUTH_CODE_SPACING_INTERVAL = 3
 @Suppress("LongMethod")
 @Composable
 fun VaultItemLoginContent(
+    vaultItemId: String,
     commonState: VaultItemState.ViewState.Content.Common,
     loginItemState: VaultItemState.ViewState.Content.ItemType.Login,
     vaultCommonItemTypeHandlers: VaultCommonItemTypeHandlers,
@@ -120,6 +122,30 @@ fun VaultItemLoginContent(
                     modifier = Modifier
                         .standardHorizontalMargin()
                         .fillMaxWidth()
+                        .animateItem(),
+                )
+            }
+        }
+
+        // DEBUG ONLY. Preserve Bitwarden's permission flags and use a fresh
+        // native master-password validation for reprompt-protected entries.
+        // Unknown cipher state fails closed; Release does not contain this UI.
+        if (BuildConfig.DEBUG && loginItemState.hasLoginCredentials &&
+            commonState.currentCipher != null
+        ) {
+            item(key = "vaultkeyHidDebug") {
+                VaultKeyUsernameHidAction(
+                    vaultItemId = vaultItemId,
+                    username = loginItemState.username,
+                    password = loginItemState.passwordData
+                        ?.takeIf { it.canViewPassword }
+                        ?.password,
+                    totpCodeItemData = loginItemState.totpCodeItemData
+                        ?.takeIf { loginItemState.canViewTotpCode },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .standardHorizontalMargin()
+                        .padding(vertical = 8.dp, horizontal = 12.dp)
                         .animateItem(),
                 )
             }

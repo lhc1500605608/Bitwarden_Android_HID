@@ -1,0 +1,91 @@
+name: VaultKey Debug CI
+
+# This independent workflow never publishes to Firebase, Play Store, or upstream Bitwarden.
+on:
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: vaultkey-debug-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  debug:
+    name: Validate HID and build debug APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - name: Checkout PR
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Java 21
+        uses: actions/setup-java@de7274f081f381c8f8158605e0321c36c376e2e6 # v6.0.1
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@3f131e8634966bd73d06cc69884922b02e6faf92 # v6.2.0
+
+      - name: Check Bitwarden SDK package token
+        env:
+          SDK_TOKEN: ${{ secrets.BITWARDEN_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          if [ -z "$SDK_TOKEN" ]; then
+            echo "::error::Configure repo Actions secret BITWARDEN_PACKAGES_TOKEN with a classic PAT (read:packages)."
+            exit 1
+          fi
+          echo "SDK package credential configured (validity checked by Gradle)."
+
+      - name: Unit tests and debug APK
+        env:
+          # External bitwarden/sdk GitHub Packages may reject the job's default token.
+          # If package resolution reports 401/403, set BITWARDEN_PACKAGES_TOKEN secret.
+          GITHUB_TOKEN: ${{ secrets.BITWARDEN_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          chmod +x ./gradlew
+          ./gradlew --no-daemon :app:testStandardDebugUnitTest --tests '*UsKeyboardReportTest' --tests '*HidOneShotVerificationTest' :app:assembleStandardDebug
+
+      - name: Merge standardRelease manifest and exclude debug session hook
+        env:
+          GITHUB_TOKEN: ${{ secrets.BITWARDEN_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          ./gradlew --no-daemon :app:processStandardReleaseMainManifest
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path("app/build/intermediates")
+          candidates = [
+              p for p in root.rglob("AndroidManifest.xml")
+              if "standardRelease" in str(p)
+              and ("merged_manifest" in str(p) or "merged_manifests" in str(p))
+          ]
+          if not candidates:
+              raise SystemExit("No merged standardRelease AndroidManifest found")
+          forbidden = (
+              "VaultKeyDebugSessionProvider",
+              "VaultKeyHidTestActivity",
+              ".vaultkeydebug",
+          )
+          for manifest in candidates:
+              text = manifest.read_text(encoding="utf-8")
+              for marker in forbidden:
+                  if marker in text:
+                      raise SystemExit(f"DEBUG-only component leaked into Release: {marker}")
+          print(f"Verified {len(candidates)} standardRelease manifest(s): no VaultKey debug entry")
+          PY
+
+      - name: Upload debug APK
+        if: success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: vaultkey-standard-debug-apk
+          path: app/build/outputs/apk/standard/debug/*.apk
+          if-no-files-found: error
+          retention-days: 7

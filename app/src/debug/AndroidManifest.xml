@@ -2,11 +2,37 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Debug-only HID prototype; no added Bluetooth permission in release variants. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Keep CPU awake for a bounded HID send; locking the display still aborts. -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-feature
+        android:name="android.hardware.bluetooth"
+        android:required="false" />
+
     <application tools:ignore="MissingApplicationIcon">
         <!-- Disable Crashlytics for debug builds -->
         <meta-data
             android:name="firebase_crashlytics_collection_enabled"
             android:value="false" />
+        <!-- Separate launcher icon only in DEBUG builds; production variants never include it. -->
+        <activity
+            android:name=".ui.platform.feature.hid.VaultKeyHidTestActivity"
+            android:exported="true"
+            android:label="VaultKey HID Test"
+            android:theme="@android:style/Theme.Material.Light.NoActionBar">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- DEBUG ONLY: Binder UID verified inside ContentProvider.call().
+             No query, insert, update or delete API. Not in Release manifest. -->
+        <provider
+            android:name=".ui.platform.feature.hid.VaultKeyDebugSessionProvider"
+            android:authorities="${applicationId}.vaultkeydebug"
+            android:exported="true"
+            android:grantUriPermissions="false" />
     </application>
 
 </manifest>
