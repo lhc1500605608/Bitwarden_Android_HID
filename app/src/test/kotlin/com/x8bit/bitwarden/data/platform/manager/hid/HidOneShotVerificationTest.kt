@@ -70,6 +70,17 @@ class HidOneShotVerificationTest {
     }
 
     @Test
+    fun `default verification grant accepts 30 seconds but refuses 30 seconds plus one ms`() {
+        val gate = HidOneShotVerification()
+        gate.issue("item-1", "host-a", field, 100L)
+        assertTrue(gate.consume("item-1", "host-a", field, 30_100L))
+
+        gate.issue("item-1", "host-a", field, 100L)
+        assertFalse(gate.consume("item-1", "host-a", field, 30_101L))
+        assertFalse(gate.consume("item-1", "host-a", field, 30_102L))
+    }
+
+    @Test
     fun `expired future and revoked grants are rejected`() {
         val gate = HidOneShotVerification(validityMs = 15_000L)
         gate.issue("item-1", "host-a", field, 100L)
