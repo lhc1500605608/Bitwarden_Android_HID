@@ -48,6 +48,7 @@ private enum class DebugHidField(val title: String) {
     USERNAME("username"),
     PASSWORD("password"),
     TOTP("TOTP"),
+    LOGIN_COMBINED("username + TAB + password"),
 }
 
 @Composable
@@ -78,6 +79,16 @@ internal fun VaultKeyUsernameHidAction(
     var pairedHosts by remember(vaultItemId) { mutableStateOf<List<BluetoothDevice>>(emptyList()) }
     var selectedHost by remember(vaultItemId) { mutableStateOf<BluetoothDevice?>(null) }
     var selectedHostLabel by remember(vaultItemId) { mutableStateOf<String?>(null) }
+
+    // Device names may not be available until after the profile connects. Never
+    // present Unknown if we have an explicitly chosen, addressable receiver.
+    fun selectedHostDisplayName(): String {
+        val host = selectedHost ?: return "No receiver selected"
+        val liveName = if (transport.hasPermission()) {
+            runCatching { host.name }.getOrNull()?.takeIf { it.isNotBlank() }
+        } else null
+        return liveName ?: selectedHostLabel?.takeIf { it.isNotBlank() } ?: host.address
+    }
     var hostPickerOpen by remember(vaultItemId) { mutableStateOf(false) }
     // Only FIELD TYPE is retained in UI state, never credential text.
     var pendingField by remember(vaultItemId) { mutableStateOf<DebugHidField?>(null) }
@@ -169,6 +180,12 @@ internal fun VaultKeyUsernameHidAction(
                 onClick = { requestField(DebugHidField.TOTP) },
             ) { Text("Send current TOTP") }
         }
+        if (!username.isNullOrEmpty() && !password.isNullOrEmpty()) {
+            Button(
+                enabled = connected,
+                onClick = { requestField(DebugHidField.LOGIN_COMBINED) },
+            ) { Text("Send username + Tab + password") }
+        }
         Text(resultMessage, modifier = Modifier.padding(bottom = 8.dp))
     }
 
@@ -198,7 +215,10 @@ internal fun VaultKeyUsernameHidAction(
                             runCatching { host.name }.getOrNull()
                         } else null
                         OutlinedButton(
-                            onClick = { selectedHost = host },
+                            onClick = {
+                                selectedHost = host
+                                selectedHostLabel = name?.takeIf { it.isNotBlank() } ?: host.address
+                            },
                             modifier = Modifier.fillMaxWidth(),
                         ) {
                             Text(
@@ -215,10 +235,10 @@ internal fun VaultKeyUsernameHidAction(
                         hidState is BluetoothHidKeyboard.State.Ready,
                     onClick = {
                         val host = selectedHost ?: return@TextButton
+                        // Assign the target identity before requesting a potentially
+                        // synchronous Bluetooth state transition.
+                        selectedHostLabel = selectedHostDisplayName()
                         resultMessage = if (transport.connect(host)) {
-                            selectedHostLabel = if (transport.hasPermission()) {
-                                runCatching { host.name }.getOrNull() ?: host.address
-                            } else host.address
                             "HID connecting; wait for Connected before sending."
                         } else {
                             "HID connect rejected; check target and connection state."
@@ -240,7 +260,7 @@ internal fun VaultKeyUsernameHidAction(
             title = { Text("Confirm DEBUG HID " + field.title + " send") },
             text = {
                 Text(
-                    "Receiving host: " + (selectedHostLabel ?: "Unknown") +
+                    "Receiving host: " + selectedHostDisplayName() +
                         ". Confirm its focused input field. DEBUG TEST ONLY: there is no " +
                         "biometric reauthentication. Never use a real password here. " +
                         "Sending is not queued or automatically retried.",
@@ -269,6 +289,21 @@ internal fun VaultKeyUsernameHidAction(
                         val value: String? = when (field) {
                             DebugHidField.USERNAME -> latestUsername
                             DebugHidField.PASSWORD -> latestPassword
+                            DebugHidField.LOGIN_COMBINED -> {
+                                val user = latestUsername
+                                val pass = latestPassword
+                                if (user.isNullOrEmpty() || pass.isNullOrEmpty()) {
+                                    null
+                                } else if (user.any { it == '\t' || it == '\n' || it == '\r' } ||
+                                    pass.any { it == '\t' || it == '\n' || it == '\r' }
+                                ) {
+                                    null
+                                } else {
+                                    // One sendAscii call, one mutex, one wake lock and one
+                                    // interruption outcome. Never split into two sends.
+                                    "${user}\t${pass}"
+                                }
+                            }
                             DebugHidField.TOTP -> latestTotp?.let { totp ->
                                 if (totp.timeLeftSeconds < 5) null
                                 else totp.verificationCode.takeIf {
@@ -279,6 +314,9 @@ internal fun VaultKeyUsernameHidAction(
                         if (value.isNullOrEmpty()) {
                             resultMessage = if (field == DebugHidField.TOTP) {
                                 "NOT SENT: current TOTP unavailable or expires in under 5 seconds."
+                            } else if (field == DebugHidField.LOGIN_COMBINED) {
+                                "NOT SENT: username and password must be present " +
+                                    "and contain no embedded tab or line breaks."
                             } else {
                                 "NOT SENT: selected field is unavailable."
                             }
