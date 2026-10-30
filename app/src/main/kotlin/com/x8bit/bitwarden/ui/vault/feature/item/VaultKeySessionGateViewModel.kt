@@ -1,6 +1,8 @@
 package com.x8bit.bitwarden.ui.vault.feature.item
 
 import androidx.lifecycle.ViewModel
+import com.bitwarden.core.data.repository.model.DataState
+import com.bitwarden.vault.CipherView
 import com.bitwarden.vault.CipherRepromptType
 import com.bitwarden.vault.CipherType
 import com.x8bit.bitwarden.data.auth.repository.AuthRepository
@@ -9,6 +11,8 @@ import com.x8bit.bitwarden.data.vault.manager.VaultLockManager
 import com.x8bit.bitwarden.data.vault.repository.VaultRepository
 import dagger.hilt.android.lifecycle.HiltViewModel
 import javax.inject.Inject
+import java.util.concurrent.ConcurrentHashMap
+import kotlinx.coroutines.flow.StateFlow
 
 /**
  * Session and current-item authorization fence for the DEBUG HID prototype.
@@ -26,7 +30,15 @@ internal class VaultKeySessionGateViewModel @Inject constructor(
     val userStateFlow = authRepository.userStateFlow
     val vaultStateEventFlow = vaultLockManager.vaultStateEventFlow
 
-    fun itemStateFlow(itemId: String) = vaultRepository.getVaultItemStateFlow(itemId)
+    // VaultRepositoryImpl starts a NEW Lazily subscribed stateIn flow on every
+    // getVaultItemStateFlow() call. Recreating it for each key would always
+    // read initial Loading and falsely revoke an otherwise valid send.
+    private val itemFlows = ConcurrentHashMap<String, StateFlow<DataState<CipherView?>>>()
+
+    fun itemStateFlow(itemId: String): StateFlow<DataState<CipherView?>> =
+        itemFlows.computeIfAbsent(itemId) {
+            vaultRepository.getVaultItemStateFlow(it)
+        }
 
     fun captureActiveUserId(): String? {
         val userId = authRepository.userStateFlow.value?.activeUserId ?: return null
@@ -46,7 +58,7 @@ internal class VaultKeySessionGateViewModel @Inject constructor(
 
     fun isItemAvailable(expectedUserId: String?, itemId: String): Boolean {
         if (!isVaultSessionValid(expectedUserId)) return false
-        val cipher = vaultRepository.getVaultItemStateFlow(itemId).value.data ?: return false
+        val cipher = itemStateFlow(itemId).value.data ?: return false
         return cipher.id == itemId &&
             cipher.type == CipherType.LOGIN &&
             cipher.reprompt != CipherRepromptType.PASSWORD
@@ -58,7 +70,7 @@ internal class VaultKeySessionGateViewModel @Inject constructor(
         field: HidOneShotVerification.Field,
     ): Boolean {
         if (!isItemAvailable(expectedUserId, itemId)) return false
-        val cipher = vaultRepository.getVaultItemStateFlow(itemId).value.data ?: return false
+        val cipher = itemStateFlow(itemId).value.data ?: return false
         val login = cipher.login ?: return false
         val account = authRepository.userStateFlow.value?.activeAccount ?: return false
         return when (field) {
