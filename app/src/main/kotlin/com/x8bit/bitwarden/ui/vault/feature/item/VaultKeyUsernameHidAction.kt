@@ -37,6 +37,7 @@ import com.x8bit.bitwarden.data.platform.manager.hid.BluetoothHidKeyboard
 import com.x8bit.bitwarden.data.platform.manager.hid.HidOneShotVerification
 import com.x8bit.bitwarden.data.vault.manager.model.VaultStateEvent
 import com.x8bit.bitwarden.ui.platform.composition.LocalBiometricsManager
+import com.x8bit.bitwarden.ui.platform.components.dialog.BitwardenMasterPasswordDialog
 import com.x8bit.bitwarden.ui.platform.manager.biometrics.BiometricsManager
 import com.x8bit.bitwarden.ui.vault.feature.item.model.TotpCodeItemData
 import kotlinx.coroutines.launch
@@ -58,6 +59,16 @@ import kotlinx.coroutines.flow.merge
  * reprompt; production security policy integration remains pending.
  * No credential in Intent, SavedStateHandle, clipboard, persisted state or logs.
  */
+private const val MASTER_REPROMPT_MAX_AGE_MS = 90_000L
+
+/** Transient successful validation scope; never stores a master password. */
+private data class MasterRepromptProof(
+    val field: DebugHidField,
+    val hostAddress: String,
+    val epoch: Int,
+    val validatedAtElapsedMs: Long,
+)
+
 private enum class DebugHidField(
     val title: String,
     val grantField: HidOneShotVerification.Field,
@@ -97,6 +108,13 @@ internal fun VaultKeyUsernameHidAction(
     // Increase on lifecycle/host change to invalidate late biometric callbacks.
     var verificationEpoch by remember(vaultItemId) { mutableStateOf(0) }
     var verifying by remember(vaultItemId) { mutableStateOf(false) }
+    var pendingMasterRepromptField by remember(vaultItemId) {
+        mutableStateOf<DebugHidField?>(null)
+    }
+    var validatingMasterReprompt by remember(vaultItemId) { mutableStateOf(false) }
+    var masterRepromptProof by remember(vaultItemId) {
+        mutableStateOf<MasterRepromptProof?>(null)
+    }
     // Pull the CURRENT field at the final confirmation, never snapshot an OTP in a dialog.
     val latestUsername by rememberUpdatedState(username)
     val latestPassword by rememberUpdatedState(password)
@@ -151,6 +169,7 @@ internal fun VaultKeyUsernameHidAction(
                 // A connection change revokes unconsumed authorizations and
                 // any pending field dialog; no implicit resends on reconnect.
                 verification.invalidate()
+                masterRepromptProof = null
                 verificationEpoch++
                 verifying = false
                 pendingField = null
@@ -163,6 +182,7 @@ internal fun VaultKeyUsernameHidAction(
                 Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
                     transport.setForegroundActive(false)
                     verification.invalidate()
+                    masterRepromptProof = null
                     verificationEpoch++
                     verifying = false
                     pendingField = null
@@ -178,6 +198,7 @@ internal fun VaultKeyUsernameHidAction(
         onDispose {
             mounted.value = false
             verification.invalidate()
+            masterRepromptProof = null
             verificationEpoch++
             verifying = false
             pendingField = null
@@ -210,6 +231,7 @@ internal fun VaultKeyUsernameHidAction(
             if (explicitLock || !vaultValid || (previouslyAuthorized && !itemValid)) {
                 sessionRevoked = true
                 verification.invalidate()
+                masterRepromptProof = null
                 verificationEpoch++
                 verifying = false
                 pendingField = null
@@ -220,9 +242,26 @@ internal fun VaultKeyUsernameHidAction(
         }
     }
 
+    fun isRepromptProofValid(field: DebugHidField): Boolean {
+        val required = sessionGate.requiresMasterPasswordReprompt(expectedUserId, vaultItemId)
+        if (required == null) return false
+        if (!required) return true
+        val proof = masterRepromptProof ?: return false
+        val now = SystemClock.elapsedRealtime()
+        return proof.field == field &&
+            proof.hostAddress == selectedHost?.address &&
+            proof.epoch == verificationEpoch &&
+            now >= proof.validatedAtElapsedMs &&
+            now - proof.validatedAtElapsedMs <= MASTER_REPROMPT_MAX_AGE_MS
+    }
+
     fun isCurrentFieldAllowed(field: DebugHidField): Boolean =
-        !sessionRevoked &&
-            sessionGate.isFieldAllowed(expectedUserId, vaultItemId, field.grantField)
+        !sessionRevoked && sessionGate.isFieldAllowed(
+            expectedUserId = expectedUserId,
+            itemId = vaultItemId,
+            field = field.grantField,
+            protectedItemRepromptVerified = isRepromptProofValid(field),
+        )
 
     // A lazy vault item flow needs a Compose subscription so UI buttons
     // re-evaluate when the item becomes available or permissions change.
@@ -232,14 +271,33 @@ internal fun VaultKeyUsernameHidAction(
         !sending && !verifying && !sessionRevoked &&
         currentCipherState.data != null &&
         sessionGate.isItemAvailable(expectedUserId, vaultItemId)
-    fun requestField(field: DebugHidField) {
+    fun requestField(
+        field: DebugHidField,
+        validatedMasterReprompt: Boolean = false,
+    ) {
         val host = selectedHost
         val now = transport.state
-        if (!connected || !isCurrentFieldAllowed(field) || host == null ||
+        val needsMasterReprompt =
+            sessionGate.requiresMasterPasswordReprompt(expectedUserId, vaultItemId)
+        val fieldPermitted = sessionGate.isFieldAllowed(
+            expectedUserId = expectedUserId,
+            itemId = vaultItemId,
+            field = field.grantField,
+            protectedItemRepromptVerified = true,
+        )
+        if (!connected || !fieldPermitted || host == null ||
             now !is BluetoothHidKeyboard.State.Connected || now.address != host.address ||
+            needsMasterReprompt == null ||
             !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         ) {
-            resultMessage = "NOT SENT: selected HID host is not CONNECTED or page not foreground."
+            resultMessage = "NOT SENT: selected HID host, vault or field is not authorized."
+            return
+        }
+        if (needsMasterReprompt && !validatedMasterReprompt) {
+            verification.invalidate()
+            masterRepromptProof = null
+            pendingMasterRepromptField = field
+            resultMessage = "Master password confirmation required for protected item."
             return
         }
         if (!biometricsManager.isUserVerificationSupported) {
@@ -248,16 +306,26 @@ internal fun VaultKeyUsernameHidAction(
         }
 
         verification.invalidate()
+        masterRepromptProof = null
         pendingField = null
         verificationExpiresAtMs = null
         verificationEpoch++
         val attempt = verificationEpoch
+        masterRepromptProof = if (needsMasterReprompt && validatedMasterReprompt) {
+            MasterRepromptProof(
+                field = field,
+                hostAddress = host.address,
+                epoch = attempt,
+                validatedAtElapsedMs = SystemClock.elapsedRealtime(),
+            )
+        } else null
         verifying = true
         resultMessage = "Verify device identity for ${field.title} before sending."
 
         fun reject(reason: String) {
             if (verificationEpoch == attempt && mounted.value) {
                 verification.invalidate()
+                masterRepromptProof = null
                 pendingField = null
                 verificationExpiresAtMs = null
                 verifying = false
@@ -299,6 +367,51 @@ internal fun VaultKeyUsernameHidAction(
         )
     }
 
+    val masterRepromptField = pendingMasterRepromptField
+    if (masterRepromptField != null) {
+        BitwardenMasterPasswordDialog(
+            onConfirmClick = { enteredMasterPassword ->
+                if (!validatingMasterReprompt) {
+                    validatingMasterReprompt = true
+                    val startedEpoch = verificationEpoch
+                    val startedHostAddress = selectedHost?.address
+                    scope.launch {
+                        val valid = runCatching {
+                            sessionGate.verifyMasterPasswordForHid(
+                                expectedUserId = expectedUserId,
+                                itemId = vaultItemId,
+                                masterPassword = enteredMasterPassword,
+                            )
+                        }.getOrDefault(false)
+                        validatingMasterReprompt = false
+                        if (!mounted.value || sessionRevoked ||
+                            pendingMasterRepromptField != masterRepromptField ||
+                            verificationEpoch != startedEpoch ||
+                            selectedHost?.address != startedHostAddress
+                        ) {
+                            pendingMasterRepromptField = null
+                            resultMessage = "NOT SENT: master-password verification context changed."
+                        } else if (!valid) {
+                            pendingMasterRepromptField = null
+                            resultMessage = "NOT SENT: invalid master password or verification failed."
+                        } else {
+                            pendingMasterRepromptField = null
+                            requestField(masterRepromptField, validatedMasterReprompt = true)
+                        }
+                    }
+                }
+            },
+            onDismissRequest = {
+                pendingMasterRepromptField = null
+                validatingMasterReprompt = false
+                verification.invalidate()
+                masterRepromptProof = null
+                verificationEpoch++
+                resultMessage = "NOT SENT: master-password verification cancelled."
+            },
+        )
+    }
+
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Text("VaultKey HID · DEBUG VERIFIED FIELD SEND (test credentials only)")
         OutlinedButton(
@@ -309,6 +422,7 @@ internal fun VaultKeyUsernameHidAction(
                     transport.start()
                     pairedHosts = transport.pairedDevices()
                     verification.invalidate()
+                    masterRepromptProof = null
                     verificationEpoch++
                     verifying = false
                     selectedHost = null
@@ -377,6 +491,7 @@ internal fun VaultKeyUsernameHidAction(
                         OutlinedButton(
                             onClick = {
                                 verification.invalidate()
+                                masterRepromptProof = null
                                 verificationEpoch++
                                 verifying = false
                                 pendingField = null
@@ -403,6 +518,7 @@ internal fun VaultKeyUsernameHidAction(
                         // Assign the target identity before requesting a potentially
                         // synchronous Bluetooth state transition.
                         verification.invalidate()
+                        masterRepromptProof = null
                         verificationEpoch++
                         verifying = false
                         verificationExpiresAtMs = null
@@ -437,6 +553,7 @@ internal fun VaultKeyUsernameHidAction(
             delay((deadlineMs - SystemClock.elapsedRealtime()).coerceAtLeast(0L))
             if (pendingField == currentField && verificationExpiresAtMs == deadlineMs) {
                 verification.invalidate()
+                masterRepromptProof = null
                 verificationEpoch++
                 pendingField = null
                 verificationExpiresAtMs = null
@@ -452,6 +569,7 @@ internal fun VaultKeyUsernameHidAction(
                 pendingField = null
                 verificationExpiresAtMs = null
                 verification.invalidate()
+                masterRepromptProof = null
                 verificationEpoch++
             },
             title = { Text("Confirm VERIFIED HID " + field.title + " send") },
@@ -471,6 +589,7 @@ internal fun VaultKeyUsernameHidAction(
                         verificationExpiresAtMs = null
                         if (sending || verifying) {
                             verification.invalidate()
+                            masterRepromptProof = null
                             return@TextButton
                         }
                         val host = selectedHost
@@ -547,6 +666,7 @@ internal fun VaultKeyUsernameHidAction(
                                 resultMessage = "INCOMPLETE / UNKNOWN. Check the receiving field."
                             } finally {
                                 sending = false
+                                masterRepromptProof = null
                             }
                         }
                     },
@@ -558,6 +678,7 @@ internal fun VaultKeyUsernameHidAction(
                         pendingField = null
                         verificationExpiresAtMs = null
                         verification.invalidate()
+                        masterRepromptProof = null
                         verificationEpoch++
                         resultMessage = "NOT SENT: confirmation cancelled. Verify again to send."
                     },
