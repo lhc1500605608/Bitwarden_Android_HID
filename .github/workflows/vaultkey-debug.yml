@@ -53,6 +53,34 @@ jobs:
           chmod +x ./gradlew
           ./gradlew --no-daemon :app:testStandardDebugUnitTest --tests '*UsKeyboardReportTest' --tests '*HidOneShotVerificationTest' :app:assembleStandardDebug
 
+      - name: Merge standardRelease manifest and exclude debug session hook
+        env:
+          GITHUB_TOKEN: ${{ secrets.BITWARDEN_PACKAGES_TOKEN || secrets.GITHUB_TOKEN }}
+        run: |
+          ./gradlew --no-daemon :app:processStandardReleaseMainManifest
+          python3 - <<'PY'
+          from pathlib import Path
+          root = Path("app/build/intermediates")
+          candidates = [
+              p for p in root.rglob("AndroidManifest.xml")
+              if "standardRelease" in str(p)
+              and ("merged_manifest" in str(p) or "merged_manifests" in str(p))
+          ]
+          if not candidates:
+              raise SystemExit("No merged standardRelease AndroidManifest found")
+          forbidden = (
+              "VaultKeyDebugSessionProvider",
+              "VaultKeyHidTestActivity",
+              ".vaultkeydebug",
+          )
+          for manifest in candidates:
+              text = manifest.read_text(encoding="utf-8")
+              for marker in forbidden:
+                  if marker in text:
+                      raise SystemExit(f"DEBUG-only component leaked into Release: {marker}")
+          print(f"Verified {len(candidates)} standardRelease manifest(s): no VaultKey debug entry")
+          PY
+
       - name: Upload debug APK
         if: success()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
