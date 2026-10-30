@@ -412,6 +412,66 @@ Pending work: username + TAB + password sequential input, explicit target
 switching/reconnect tests, standard keyboard layout handling, password/TOTP
 security gate re-enablement, code near-expiry handling and release policy.
 
+## 2026-10-30: Field-by-field validation complete; combined login introduced
+
+### Verified on Redmi K20 Pro -> Mac mini, Debug build afdb454a / CI 40900282041
+
+- USERNAME: `admin` (5 bytes) received exactly. Android reported 5/5.
+- PASSWORD: 23-character **synthetic test password** received exactly; mixed
+  case and US punctuation such as @/# verified. Android reported 23/23.
+  Keep the password out of logs, screenshots and test reports.
+- TOTP: A disposable 32-character Base32 TOTP secret was installed manually
+  into the test Login item. Mac received the correct six-digit HMAC-SHA1
+  code for the **same 30-second time window**. Android reported 6/6.
+- TOTP with three seconds remaining: **0 host bytes**, explicit `NOT SENT`
+  because less than five seconds remained. Confirmed a fresh code is chosen
+  after the confirmation dialog, not cached when it opens.
+- No crashes. Ignore unrelated autofill provider and graphics-stack warnings.
+- The host's capture process exiting previously caused an apparent 0-byte
+  send despite Android acceptance. Verify the host capture process is alive.
+
+### Next: combined login functional test (new patch)
+
+The DEBUG-only Login action now offers **Send username + Tab + password**
+when both fields are available and password-view permission permits it.
+
+- Uses **one** `sendAscii(username + "\\t" + password)` call — one
+  send mutex, CPU wake-lock window, one interruption outcome, no automatic
+  retry or replay between fields.
+- Tab is the standard HID keyboard usage `0x2B`, not a fake character and
+  not an explicit file byte until interpreted by the receiving host.
+- Reject embedded line breaks or Tab inside either test field before
+  constructing a combined command, and reject unsupported characters
+  atomically before sending any keystrokes.
+- The target-host confirmation derives a live Bluetooth name from the selected
+  device; if unavailable, shows its Bluetooth address instead of `Unknown`.
+- Debug mode still has **NO BIOMETRIC GATE** by owner's request to support
+  ADB automation. Never use real credentials or merge this mode as release.
+
+**Focused test on a disposable Login entry `test1`:**
+
+1. Install the APK from the **latest successfully completed** VaultKey Debug
+   CI run. Keep the receiving Mac on the **ABC** keyboard layout.
+2. Confirm the dialog says the intended Mac mini (or its address), not
+   `Receiving host: Unknown` or a stale headphones name.
+3. Use the button **Send username + Tab + password**. For raw byte capture,
+   configure the terminal in raw/no-echo mode so `Tab` is not intercepted
+   by the line editor; expected capture is
+   `username.encode(US_ASCII) + b'\\x09' + password.encode(US_ASCII)`.
+4. Verify practical **focus transfer** separately: put two input fields
+   side by side (e.g. a local offline dummy login form), focus username,
+   send combined, and confirm the password goes to the **password field**,
+   not the username field. Record no password text, only match yes/no.
+5. Confirm no second send occurred, no missing first password character,
+   no duplicate Tab. Also test screen-off mid-combination once:
+   report INCOMPLETE/UNKNOWN, no automatic completion after unlock.
+6. Don't repeat earlier validated stand-alone username/password/TOTP tests
+   unless the combined change reveals a regression.
+
+Still pending: permissions/authentication/re-prompt hardening and eventual
+release integration. The independent user verification grant/tests remain
+available, but are deliberately not active in this debug functionality build.
+
 ## Boundaries and known limitations
 
 - **Never use real account credentials** for this test; testing does not require logging in to Vaultwarden.
