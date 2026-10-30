@@ -10,7 +10,7 @@ package com.x8bit.bitwarden.data.platform.manager.hid
  * No wall-clock timestamps: callers use Android's elapsedRealtime clock.
  */
 internal class HidOneShotVerification(
-    private val validityMs: Long = 15_000L,
+    private val validityMs: Long = 30_000L,
 ) {
     enum class Field { USERNAME, PASSWORD, TOTP, LOGIN_COMBINED }
 
