@@ -4,6 +4,7 @@ import android.Manifest
 import android.bluetooth.BluetoothDevice
 import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.hilt.lifecycle.viewmodel.compose.hiltViewModel
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -38,6 +39,8 @@ import com.x8bit.bitwarden.ui.platform.manager.biometrics.BiometricsManager
 import com.x8bit.bitwarden.ui.vault.feature.item.model.TotpCodeItemData
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
 
 /**
  * Debug-only functional bridge from the unlocked Bitwarden Login item to Bluetooth HID.
@@ -70,6 +73,7 @@ internal fun VaultKeyUsernameHidAction(
     totpCodeItemData: TotpCodeItemData?,
     modifier: Modifier = Modifier,
     biometricsManager: BiometricsManager = LocalBiometricsManager.current,
+    sessionGate: VaultKeySessionGateViewModel = hiltViewModel(),
 ) {
     // A runtime guard as well as the BuildConfig.DEBUG call-site gate.
     if (!BuildConfig.DEBUG) return
@@ -80,6 +84,10 @@ internal fun VaultKeyUsernameHidAction(
         BluetoothHidKeyboard(context.applicationContext)
     }
     val scope = rememberCoroutineScope()
+    // Fixed to the active account at this item screen's creation. A later
+    // account switch may NEVER authorize this original screen's cipher.
+    val expectedUserId = remember(vaultItemId) { sessionGate.captureActiveUserId() }
+    var sessionRevoked by remember(vaultItemId) { mutableStateOf(false) }
     val verification = remember(vaultItemId) { HidOneShotVerification() }
     val mounted = remember(vaultItemId) { mutableStateOf(true) }
     // Increase on lifecycle/host change to invalidate late biometric callbacks.
@@ -177,12 +185,38 @@ internal fun VaultKeyUsernameHidAction(
         }
     }
 
+    // Reactive notification for account switches, vault locking and item
+    // revocation. Independent synchronous checks below run at every HID key.
+    LaunchedEffect(vaultItemId, expectedUserId, sessionGate) {
+        merge(
+            sessionGate.userStateFlow.map { Unit },
+            sessionGate.vaultStateEventFlow.map { Unit },
+            sessionGate.itemStateFlow(vaultItemId).map { Unit },
+        ).collect {
+            if (!sessionGate.isItemAvailable(expectedUserId, vaultItemId)) {
+                sessionRevoked = true
+                verification.invalidate()
+                verificationEpoch++
+                verifying = false
+                pendingField = null
+                verificationExpiresAtMs = null
+                transport.abortActiveSend()
+                resultMessage = "NOT SENT / INTERRUPTED: vault locked, account switched or item removed."
+            }
+        }
+    }
+
+    fun isCurrentFieldAllowed(field: DebugHidField): Boolean =
+        !sessionRevoked &&
+            sessionGate.isFieldAllowed(expectedUserId, vaultItemId, field.grantField)
+
     val connected = hidState is BluetoothHidKeyboard.State.Connected &&
-        !sending && !verifying
+        !sending && !verifying && !sessionRevoked &&
+        sessionGate.isItemAvailable(expectedUserId, vaultItemId)
     fun requestField(field: DebugHidField) {
         val host = selectedHost
         val now = transport.state
-        if (!connected || host == null ||
+        if (!connected || !isCurrentFieldAllowed(field) || host == null ||
             now !is BluetoothHidKeyboard.State.Connected || now.address != host.address ||
             !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
         ) {
@@ -218,6 +252,7 @@ internal fun VaultKeyUsernameHidAction(
             onSuccess = {
                 val current = transport.state
                 if (verificationEpoch == attempt && mounted.value && verifying &&
+                    isCurrentFieldAllowed(field) &&
                     lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
                     selectedHost?.address == host.address &&
                     current is BluetoothHidKeyboard.State.Connected &&
@@ -430,6 +465,10 @@ internal fun VaultKeyUsernameHidAction(
                             resultMessage = "NOT SENT: verification expired or item/host/field changed."
                             return@TextButton
                         }
+                        if (!isCurrentFieldAllowed(field)) {
+                            resultMessage = "NOT SENT: vault, account or field permissions changed."
+                            return@TextButton
+                        }
                         val now = transport.state
                         if (now !is BluetoothHidKeyboard.State.Connected ||
                             now.address != host.address ||
@@ -482,7 +521,9 @@ internal fun VaultKeyUsernameHidAction(
                             try {
                                 // Transport checks the real CONNECTED profile and refuses
                                 // sending while CONNECTING. It stops on screen-off without replay.
-                                resultMessage = transport.sendAscii(value).summary()
+                                resultMessage = transport.sendAscii(value) {
+                                    isCurrentFieldAllowed(field)
+                                }.summary()
                             } catch (_: Exception) {
                                 resultMessage = "INCOMPLETE / UNKNOWN. Check the receiving field."
                             } finally {
