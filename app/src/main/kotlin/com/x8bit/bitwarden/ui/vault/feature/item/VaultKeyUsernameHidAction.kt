@@ -40,6 +40,7 @@ import com.x8bit.bitwarden.ui.platform.composition.LocalBiometricsManager
 import com.x8bit.bitwarden.ui.platform.manager.biometrics.BiometricsManager
 import com.x8bit.bitwarden.ui.vault.feature.item.model.TotpCodeItemData
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
@@ -67,6 +68,7 @@ private enum class DebugHidField(
     LOGIN_COMBINED("username + TAB + password", HidOneShotVerification.Field.LOGIN_COMBINED),
 }
 
+@OptIn(ExperimentalCoroutinesApi::class)
 @Composable
 internal fun VaultKeyUsernameHidAction(
     vaultItemId: String,
