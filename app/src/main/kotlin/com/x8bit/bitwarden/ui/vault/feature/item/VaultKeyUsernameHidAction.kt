@@ -2,6 +2,7 @@ package com.x8bit.bitwarden.ui.vault.feature.item
 
 import android.Manifest
 import android.bluetooth.BluetoothDevice
+import android.os.SystemClock
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -30,25 +31,33 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.x8bit.bitwarden.BuildConfig
 import com.x8bit.bitwarden.data.platform.manager.hid.BluetoothHidKeyboard
+import com.x8bit.bitwarden.data.platform.manager.hid.HidOneShotVerification
+import com.x8bit.bitwarden.ui.platform.composition.LocalBiometricsManager
+import com.x8bit.bitwarden.ui.platform.manager.biometrics.BiometricsManager
 import com.x8bit.bitwarden.ui.vault.feature.item.model.TotpCodeItemData
 import kotlinx.coroutines.launch
 
 /**
  * Debug-only functional bridge from the unlocked Bitwarden Login item to Bluetooth HID.
  *
- * SECURITY GATE IS TEMPORARILY DEFERRED FOR AUTOMATED TESTING.
- * Use only synthetic credentials in a disposable vault; never production passwords.
- * The separate one-use verification implementation/tests stay in the repository
- * for re-enabling when host, field and end-to-end function tests pass.
+ * Requires a fresh Bitwarden biometric/device-credential user-verification
+ * prompt for EACH send, followed by a second explicit receiving-host confirmation.
+ * The grant is valid for only the selected vault item, Bluetooth host and HID
+ * field; it expires after 15 seconds and is consumed before the send.
  *
+ * This stays DEBUG-only and must be exercised with SYNTHETIC vault data.
+ * Device verification is not equivalent to a policy-required master-password
+ * reprompt; production security policy integration remains pending.
  * No credential in Intent, SavedStateHandle, clipboard, persisted state or logs.
- * A fresh explicit host/field confirmation is still required for each send.
  */
-private enum class DebugHidField(val title: String) {
-    USERNAME("username"),
-    PASSWORD("password"),
-    TOTP("TOTP"),
-    LOGIN_COMBINED("username + TAB + password"),
+private enum class DebugHidField(
+    val title: String,
+    val grantField: HidOneShotVerification.Field,
+) {
+    USERNAME("username", HidOneShotVerification.Field.USERNAME),
+    PASSWORD("password", HidOneShotVerification.Field.PASSWORD),
+    TOTP("TOTP", HidOneShotVerification.Field.TOTP),
+    LOGIN_COMBINED("username + TAB + password", HidOneShotVerification.Field.LOGIN_COMBINED),
 }
 
 @Composable
@@ -58,6 +67,7 @@ internal fun VaultKeyUsernameHidAction(
     password: String?,
     totpCodeItemData: TotpCodeItemData?,
     modifier: Modifier = Modifier,
+    biometricsManager: BiometricsManager = LocalBiometricsManager.current,
 ) {
     // A runtime guard as well as the BuildConfig.DEBUG call-site gate.
     if (!BuildConfig.DEBUG) return
@@ -68,6 +78,11 @@ internal fun VaultKeyUsernameHidAction(
         BluetoothHidKeyboard(context.applicationContext)
     }
     val scope = rememberCoroutineScope()
+    val verification = remember(vaultItemId) { HidOneShotVerification() }
+    val mounted = remember(vaultItemId) { mutableStateOf(true) }
+    // Increase on lifecycle/host change to invalidate late biometric callbacks.
+    var verificationEpoch by remember(vaultItemId) { mutableStateOf(0) }
+    var verifying by remember(vaultItemId) { mutableStateOf(false) }
     // Pull the CURRENT field at the final confirmation, never snapshot an OTP in a dialog.
     val latestUsername by rememberUpdatedState(username)
     val latestPassword by rememberUpdatedState(password)
@@ -80,14 +95,19 @@ internal fun VaultKeyUsernameHidAction(
     var selectedHost by remember(vaultItemId) { mutableStateOf<BluetoothDevice?>(null) }
     var selectedHostLabel by remember(vaultItemId) { mutableStateOf<String?>(null) }
 
-    // Device names may not be available until after the profile connects. Never
-    // present Unknown if we have an explicitly chosen, addressable receiver.
+    // Always include the selected device's actual Bluetooth address in confirmation:
+    // a friendly name alone can be duplicated or stale.
     fun selectedHostDisplayName(): String {
         val host = selectedHost ?: return "No receiver selected"
         val liveName = if (transport.hasPermission()) {
-            runCatching { host.name }.getOrNull()?.takeIf { it.isNotBlank() }
+            runCatching { host.name }.getOrNull()?.takeIf {
+                it.isNotBlank() && !it.equals("Unknown", ignoreCase = true)
+            }
         } else null
-        return liveName ?: selectedHostLabel?.takeIf { it.isNotBlank() } ?: host.address
+        val label = liveName ?: selectedHostLabel?.takeIf {
+            it.isNotBlank() && it != host.address && !it.equals("Unknown", ignoreCase = true)
+        }
+        return if (label == null) host.address else "$label (${host.address})"
     }
     var hostPickerOpen by remember(vaultItemId) { mutableStateOf(false) }
     // Only FIELD TYPE is retained in UI state, never credential text.
@@ -109,13 +129,26 @@ internal fun VaultKeyUsernameHidAction(
     }
 
     DisposableEffect(transport, lifecycleOwner, vaultItemId) {
-        transport.onStateChanged = { hidState = it }
+        mounted.value = true
+        transport.onStateChanged = { next ->
+            hidState = next
+            if (next !is BluetoothHidKeyboard.State.Connected) {
+                // A connection change revokes unconsumed authorizations and
+                // any pending field dialog; no implicit resends on reconnect.
+                verification.invalidate()
+                verificationEpoch++
+                verifying = false
+                pendingField = null
+            }
+        }
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> transport.setForegroundActive(true)
                 Lifecycle.Event.ON_PAUSE, Lifecycle.Event.ON_STOP -> {
                     transport.setForegroundActive(false)
-                    // Never resume an unconfirmed transfer when the vault is backgrounded.
+                    verification.invalidate()
+                    verificationEpoch++
+                    verifying = false
                     pendingField = null
                 }
                 else -> Unit
@@ -126,6 +159,10 @@ internal fun VaultKeyUsernameHidAction(
             transport.setForegroundActive(true)
         }
         onDispose {
+            mounted.value = false
+            verification.invalidate()
+            verificationEpoch++
+            verifying = false
             pendingField = null
             transport.setForegroundActive(false)
             lifecycleOwner.lifecycle.removeObserver(observer)
@@ -134,17 +171,72 @@ internal fun VaultKeyUsernameHidAction(
         }
     }
 
-    val connected = hidState is BluetoothHidKeyboard.State.Connected && !sending
+    val connected = hidState is BluetoothHidKeyboard.State.Connected &&
+        !sending && !verifying
     fun requestField(field: DebugHidField) {
-        if (!connected || selectedHost == null) {
-            resultMessage = "NOT SENT: select and connect the intended receiving computer."
+        val host = selectedHost
+        val now = transport.state
+        if (!connected || host == null ||
+            now !is BluetoothHidKeyboard.State.Connected || now.address != host.address ||
+            !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
+        ) {
+            resultMessage = "NOT SENT: selected HID host is not CONNECTED or page not foreground."
             return
         }
-        pendingField = field
+        if (!biometricsManager.isUserVerificationSupported) {
+            resultMessage = "NOT SENT: strong biometrics/device credential verification unavailable."
+            return
+        }
+
+        verification.invalidate()
+        pendingField = null
+        verificationEpoch++
+        val attempt = verificationEpoch
+        verifying = true
+        resultMessage = "Verify device identity for ${field.title} before sending."
+
+        fun reject(reason: String) {
+            if (verificationEpoch == attempt && mounted.value) {
+                verification.invalidate()
+                pendingField = null
+                verifying = false
+                resultMessage = "NOT SENT: $reason"
+            }
+        }
+
+        // Bitwarden's existing system prompt. There is no local bypass switch
+        // and no "verified" flag that can be set from a UI automation click.
+        biometricsManager.promptUserVerification(
+            onSuccess = {
+                val current = transport.state
+                if (verificationEpoch == attempt && mounted.value && verifying &&
+                    lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED) &&
+                    selectedHost?.address == host.address &&
+                    current is BluetoothHidKeyboard.State.Connected &&
+                    current.address == host.address
+                ) {
+                    verification.issue(
+                        itemId = vaultItemId,
+                        hostAddress = host.address,
+                        field = field.grantField,
+                        nowElapsedMs = SystemClock.elapsedRealtime(),
+                    )
+                    verifying = false
+                    pendingField = field
+                    resultMessage = "Verified. Confirm selected host within 15 seconds."
+                } else {
+                    reject("host, item, or foreground changed during verification.")
+                }
+            },
+            onCancel = { reject("device verification cancelled.") },
+            onLockOut = { reject("device verification locked out.") },
+            onError = { reject("device verification failed.") },
+            onNotSupported = { reject("device verification not supported.") },
+        )
     }
 
     Column(modifier = modifier, verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Text("VaultKey HID · DEBUG FUNCTION TEST — NO BIOMETRIC GATE")
+        Text("VaultKey HID · DEBUG VERIFIED FIELD SEND (test credentials only)")
         OutlinedButton(
             onClick = {
                 if (!transport.hasPermission()) {
@@ -152,6 +244,9 @@ internal fun VaultKeyUsernameHidAction(
                 } else {
                     transport.start()
                     pairedHosts = transport.pairedDevices()
+                    verification.invalidate()
+                    verificationEpoch++
+                    verifying = false
                     selectedHost = null
                     selectedHostLabel = null
                     pendingField = null
@@ -216,6 +311,10 @@ internal fun VaultKeyUsernameHidAction(
                         } else null
                         OutlinedButton(
                             onClick = {
+                                verification.invalidate()
+                                verificationEpoch++
+                                verifying = false
+                                pendingField = null
                                 selectedHost = host
                                 selectedHostLabel = name?.takeIf { it.isNotBlank() } ?: host.address
                             },
@@ -237,6 +336,9 @@ internal fun VaultKeyUsernameHidAction(
                         val host = selectedHost ?: return@TextButton
                         // Assign the target identity before requesting a potentially
                         // synchronous Bluetooth state transition.
+                        verification.invalidate()
+                        verificationEpoch++
+                        verifying = false
                         selectedHostLabel = selectedHostDisplayName()
                         resultMessage = if (transport.connect(host)) {
                             "HID connecting; wait for Connected before sending."
@@ -256,14 +358,17 @@ internal fun VaultKeyUsernameHidAction(
     val field = pendingField
     if (field != null) {
         AlertDialog(
-            onDismissRequest = { pendingField = null },
-            title = { Text("Confirm DEBUG HID " + field.title + " send") },
+            onDismissRequest = {
+                pendingField = null
+                verification.invalidate()
+            },
+            title = { Text("Confirm VERIFIED HID " + field.title + " send") },
             text = {
                 Text(
                     "Receiving host: " + selectedHostDisplayName() +
-                        ". Confirm its focused input field. DEBUG TEST ONLY: there is no " +
-                        "biometric reauthentication. Never use a real password here. " +
-                        "Sending is not queued or automatically retried.",
+                        ". Confirm the focused field after device verification. " +
+                        "Authorization lasts 15 seconds, one send only. " +
+                        "DEBUG test credentials only; no automatic resend.",
                 )
             },
             confirmButton = {
@@ -271,14 +376,25 @@ internal fun VaultKeyUsernameHidAction(
                     onClick = {
                         // Capture only the field kind here. Read actual data at send instant.
                         pendingField = null
-                        if (sending) return@TextButton
+                        if (sending || verifying) {
+                            verification.invalidate()
+                            return@TextButton
+                        }
                         val host = selectedHost
-                        val now = transport.state
-                        if (host == null || now !is BluetoothHidKeyboard.State.Connected ||
-                            now.address != host.address ||
-                            !lifecycleOwner.lifecycle.currentState.isAtLeast(
-                                Lifecycle.State.RESUMED
+                        if (host == null || !verification.consume(
+                                itemId = vaultItemId,
+                                hostAddress = host.address,
+                                field = field.grantField,
+                                nowElapsedMs = SystemClock.elapsedRealtime(),
                             )
+                        ) {
+                            resultMessage = "NOT SENT: verification expired or item/host/field changed."
+                            return@TextButton
+                        }
+                        val now = transport.state
+                        if (now !is BluetoothHidKeyboard.State.Connected ||
+                            now.address != host.address ||
+                            !lifecycleOwner.lifecycle.currentState.isAtLeast(Lifecycle.State.RESUMED)
                         ) {
                             resultMessage = "NOT SENT: HID is not connected/foreground."
                             return@TextButton
@@ -338,7 +454,12 @@ internal fun VaultKeyUsernameHidAction(
                 ) { Text("Send once") }
             },
             dismissButton = {
-                TextButton(onClick = { pendingField = null }) { Text("Cancel") }
+                TextButton(
+                    onClick = {
+                        pendingField = null
+                        verification.invalidate()
+                    },
+                ) { Text("Cancel") }
             },
         )
     }
