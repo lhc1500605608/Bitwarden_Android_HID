@@ -35,6 +35,7 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.x8bit.bitwarden.BuildConfig
 import com.x8bit.bitwarden.data.platform.manager.hid.BluetoothHidKeyboard
 import com.x8bit.bitwarden.data.platform.manager.hid.HidOneShotVerification
+import com.x8bit.bitwarden.data.vault.manager.model.VaultStateEvent
 import com.x8bit.bitwarden.ui.platform.composition.LocalBiometricsManager
 import com.x8bit.bitwarden.ui.platform.manager.biometrics.BiometricsManager
 import com.x8bit.bitwarden.ui.vault.feature.item.model.TotpCodeItemData
@@ -191,16 +192,20 @@ internal fun VaultKeyUsernameHidAction(
     LaunchedEffect(vaultItemId, expectedUserId, sessionGate) {
         var previouslyAuthorized = false
         merge(
-            sessionGate.userStateFlow.map { Unit },
-            sessionGate.vaultStateEventFlow.map { Unit },
-            sessionGate.itemStateFlow(vaultItemId).map { Unit },
-        ).collect {
+            sessionGate.userStateFlow.map { false },
+            // Treat the explicit lock event itself as authoritative, even if
+            // a separate user-state or lock-state update has not arrived yet.
+            sessionGate.vaultStateEventFlow.map { event ->
+                event is VaultStateEvent.Locked && event.userId == expectedUserId
+            },
+            sessionGate.itemStateFlow(vaultItemId).map { false },
+        ).collect { explicitLock ->
             val vaultValid = sessionGate.isVaultSessionValid(expectedUserId)
             val itemValid = sessionGate.isItemAvailable(expectedUserId, vaultItemId)
             // The item StateFlow begins in Loading. That is not revocation
             // until a previously available item actually disappears/changes.
             if (itemValid) previouslyAuthorized = true
-            if (!vaultValid || (previouslyAuthorized && !itemValid)) {
+            if (explicitLock || !vaultValid || (previouslyAuthorized && !itemValid)) {
                 sessionRevoked = true
                 verification.invalidate()
                 verificationEpoch++
