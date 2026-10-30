@@ -1,5 +1,90 @@
 # VaultKey Bluetooth HID prototype (Android / K20 Pro)
 
+## Debug-only REAL vault lock/account-switch test control
+
+To isolate a vault-lock or account-change event from the normal Compose
+navigation and modal dialog dismissal, the Debug APK now includes
+`VaultKeyDebugSessionReceiver`. **Not present in Release.** The receiver
+accepts explicit broadcasts ONLY from the real ADB shell UID (2000) on
+Android 14+, and rejects unverifiable sender identity. It does not
+manufacture a vault lock event, bypass login, change or expose passwords,
+or delete test entries.
+
+Requires a trusted USB ADB connection and a successfully installed Debug APK.
+Check `adb shell id -u`: it should be `2000`; avoid root `su`.
+Do not include account IDs or passwords in commands or log output.
+
+### 1. Immediately lock the current vault (real Bitwarden state transition)
+
+```bash
+adb shell am broadcast \
+  -n com.x8bit.bitwarden.dev/com.x8bit.bitwarden.ui.platform.feature.hid.VaultKeyDebugSessionReceiver \
+  -a com.x8bit.bitwarden.dev.vaultkey.DEBUG_LOCK_VAULT
+```
+
+Receiver emits the non-sensitive log tag
+`VaultKeyHID: event=debug_real_lock_requested`. This proves the command
+was accepted, **not** yet that the HID output stopped. Capture actual
+lock state and receiving-host bytes separately. This invokes
+`VaultLockManager.lockVault(activeUserId, isUserInitiated=true)`
+and lets the regular Bitwarden lock state/event machinery run.
+
+### 2. Switch to another already logged-in account (real switch)
+
+```bash
+adb shell am broadcast \
+  -n com.x8bit.bitwarden.dev/com.x8bit.bitwarden.ui.platform.feature.hid.VaultKeyDebugSessionReceiver \
+  -a com.x8bit.bitwarden.dev.vaultkey.DEBUG_SWITCH_OTHER
+```
+
+This switches only to a **different, already logged-in** account via
+`AuthRepository.switchAccount`; no email or user ID extras are accepted.
+If no such account exists, it logs
+`event=debug_switch_no_other_logged_in_account` and changes nothing.
+The accepted path logs `event=debug_real_account_switch result=switched`.
+With exactly two logged-in accounts, sending it again should switch back,
+but verify the visible active account before resuming tests.
+Switching accounts can navigate/close the current screen: this is normal.
+Do not use real vault credentials while the debug probe is installed.
+
+### Targeted negative tests (no re-run of HID baselines)
+
+- **T2 Lock after biometric success, before Send once:** Keep the target
+  confirmation open, deliver the lock broadcast from ADB. Expect the
+  real lock transition, no HID bytes and the old grant revoked. If the
+  modal is destroyed, report that explicitly rather than pretending a
+  confirmation button was tapped.
+- **T3 Lock during HID sending:** Start the synthetic 29-character combined
+  send and issue the lock broadcast while it is still transmitting (e.g.,
+  1–2 seconds into the ~4.8-second sequence). Expect a prefix only,
+  INCOMPLETE/UNKNOWN and **no replay** after unlocking. Log the exact lock
+  invocation timestamp relative to the first host key to establish
+  this really tested lock rather than UI backgrounding.
+- **T4 Switch active account during confirmation or input:** Deliver the
+  switch broadcast while the old item screen is active. Expect account
+  changed, old authorization revoked, 0 bytes if before Send once, or
+  partial/no replay if mid-send. Return to the original account by the
+  normal account selector or the same debug action and unlock manually.
+- **Item deletion/policy changes:** No destructive debug command is
+  provided. These remain **UNTESTED** until a safe non-destructive
+  controlled test fixture exists.
+
+### Verify the probe is restricted
+
+A non-shell broadcasting app must not be allowed to lock or switch via
+this receiver. Log `event=debug_session_command_rejected` indicates
+a sender identity mismatch or unknown identity. Some vendor ROMs
+report `Process.INVALID_UID` for `am broadcast`; in that case the
+receiver must refuse the command. Mark that test **BLOCKED** and do not
+weaken the UID guard. A successful `am broadcast` command alone is
+not evidence the receiver performed the action.
+
+The receiving Mac still needs ABC keyboard layout and an active raw
+capture process. Never log sensitive keyboard payloads, user IDs,
+account email addresses, or vault secrets.
+
+---
+
 ## 2026-10-30: Live account / vault-lock / item permission fence (under test)
 
 The latest DEBUG-only bridge now obtains a `VaultKeySessionGateViewModel`
