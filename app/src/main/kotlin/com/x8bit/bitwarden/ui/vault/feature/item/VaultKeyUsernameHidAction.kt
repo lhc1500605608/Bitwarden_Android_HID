@@ -170,6 +170,8 @@ internal fun VaultKeyUsernameHidAction(
                 // any pending field dialog; no implicit resends on reconnect.
                 verification.invalidate()
                 masterRepromptProof = null
+                pendingMasterRepromptField = null
+                validatingMasterReprompt = false
                 verificationEpoch++
                 verifying = false
                 pendingField = null
@@ -199,6 +201,8 @@ internal fun VaultKeyUsernameHidAction(
             mounted.value = false
             verification.invalidate()
             masterRepromptProof = null
+            pendingMasterRepromptField = null
+            validatingMasterReprompt = false
             verificationEpoch++
             verifying = false
             pendingField = null
@@ -232,6 +236,8 @@ internal fun VaultKeyUsernameHidAction(
                 sessionRevoked = true
                 verification.invalidate()
                 masterRepromptProof = null
+                pendingMasterRepromptField = null
+                validatingMasterReprompt = false
                 verificationEpoch++
                 verifying = false
                 pendingField = null
@@ -423,6 +429,8 @@ internal fun VaultKeyUsernameHidAction(
                     pairedHosts = transport.pairedDevices()
                     verification.invalidate()
                     masterRepromptProof = null
+                    pendingMasterRepromptField = null
+                    validatingMasterReprompt = false
                     verificationEpoch++
                     verifying = false
                     selectedHost = null
