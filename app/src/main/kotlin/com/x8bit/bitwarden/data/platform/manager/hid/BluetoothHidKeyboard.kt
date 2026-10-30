@@ -65,6 +65,7 @@ class BluetoothHidKeyboard(private val context: Context) {
         INCOMPLETE_OR_UNCERTAIN,
         NOT_CONNECTED,
         NOT_FOREGROUND,
+        NOT_AUTHORIZED,
         UNSUPPORTED_TEXT,
     }
 
@@ -85,6 +86,8 @@ class BluetoothHidKeyboard(private val context: Context) {
                 "NOT SENT: Bluetooth HID is not fully CONNECTED."
             SendStatus.NOT_FOREGROUND ->
                 "NOT SENT: phone locked, display off, or test Activity not foreground."
+            SendStatus.NOT_AUTHORIZED ->
+                "NOT SENT: vault locked, account/item changed or field no longer permitted."
             SendStatus.UNSUPPORTED_TEXT ->
                 "NOT SENT: character unsupported by US keyboard mapping."
         }
@@ -612,7 +615,10 @@ class BluetoothHidKeyboard(private val context: Context) {
      * HID sendReport returns "submitted to Android", not "received by the remote host".
      * Never replay a partial send automatically: it could duplicate credential prefixes.
      */
-    suspend fun sendAscii(text: String): SendResult = sendMutex.withLock {
+    suspend fun sendAscii(
+        text: String,
+        canContinue: () -> Boolean = { true },
+    ): SendResult = sendMutex.withLock {
         val strokes = UsKeyboardReport.encode(text)
             ?: return@withLock SendResult(
                 SendStatus.UNSUPPORTED_TEXT, 0, text.length,
@@ -637,6 +643,11 @@ class BluetoothHidKeyboard(private val context: Context) {
         if (!foregroundActive || power?.isInteractive != true) {
             return@withLock result(SendStatus.NOT_FOREGROUND, 0)
         }
+        // The vault and current item's authorization is verified independently
+        // of the Bluetooth profile. It must remain valid THROUGHOUT the send.
+        if (!canContinue()) {
+            return@withLock result(SendStatus.NOT_AUTHORIZED, 0)
+        }
         if (!hasPermission() || !isRegistered || service == null || destination == null ||
             state !is State.Connected || selectedPeerAddress != destination.address ||
             disconnectRequested ||
@@ -660,7 +671,8 @@ class BluetoothHidKeyboard(private val context: Context) {
         try {
             withContext(Dispatchers.IO) {
                 for (stroke in strokes) {
-                    val valid = foregroundActive && power.isInteractive &&
+                    val valid = canContinue() &&
+                        foregroundActive && power.isInteractive &&
                         sendAbortGeneration.get() == initialAbort &&
                         linkGeneration.get() == initialLink &&
                         hasPermission() && isRegistered &&
@@ -686,7 +698,8 @@ class BluetoothHidKeyboard(private val context: Context) {
                 }
                 // Final check matters: screen-off or disconnect can occur after last
                 // report was accepted but before the coroutine finishes.
-                if (!foregroundActive || !power.isInteractive ||
+                if (!canContinue() ||
+                    !foregroundActive || !power.isInteractive ||
                     sendAbortGeneration.get() != initialAbort ||
                     linkGeneration.get() != initialLink ||
                     !isRegistered || state !is State.Connected ||
