@@ -26,12 +26,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        <!-- Enabled exclusively in Debug. Receiver checks the real sender UID
-             and accepts only the ADB shell UID on Android 14+; no fallback.
-             No intent filter: invoke by explicit component only. -->
-        <receiver
-            android:name=".ui.platform.feature.hid.VaultKeyDebugSessionReceiver"
-            android:exported="true" />
+        <!-- DEBUG ONLY: Binder UID verified inside ContentProvider.call().
+             No query, insert, update or delete API. Not in Release manifest. -->
+        <provider
+            android:name=".ui.platform.feature.hid.VaultKeyDebugSessionProvider"
+            android:authorities="${applicationId}.vaultkeydebug"
+            android:exported="true"
+            android:grantUriPermissions="false" />
     </application>
 
 </manifest>
