@@ -1,5 +1,64 @@
 # VaultKey Bluetooth HID prototype (Android / K20 Pro)
 
+## CURRENT STATUS — 2026-10-30 (supersedes earlier milestone notes)
+
+**Functionality accepted:** Redmi K20 Pro Android 17 → macOS 26.1 with ABC
+input, Debug APK `ba4bfa4c` / CI `40979572160`.
+Individual username (5/5), synthetic password (23/23), synthetic TOTP
+(6/6; near-expiry rejection) and combined username + Tab + password
+(29/29) were captured byte-for-byte on the receiving host. Combined Tab
+navigated a real two-field offline HTML login form. Mid-combination
+screen-off stopped at 25/29, showed INCOMPLETE/UNKNOWN and did not replay.
+The selected Mac's real name was shown instead of Unknown; no crashes.
+
+**Latest change: re-enable required device user verification for every field**
+(including the combined login send). The previously built Debug functional
+bypass is **no longer active** on this branch. Reuse Bitwarden's
+`BiometricsManager.promptUserVerification` for BIOMETRIC_STRONG or
+DEVICE_CREDENTIAL; no custom PIN, no shortcut. A success produces a
+15-second, single-use, in-memory `HidOneShotVerification` ticket bound to
+`vaultItemId + selected Bluetooth MAC + exact field`. The combined
+USERNAME+TAB+PASSWORD field has its **own grant type** and cannot reuse a
+USERNAME or PASSWORD grant. The second confirmation shows **host name plus
+Bluetooth MAC**; on cancellation, host switch, profile loss, app pause,
+navigation, or timeout, no unconsumed grant may be used. Password and TOTP
+still use existing Bitwarden field-view permissions; TOTP is read after
+confirmation, rejecting codes with less than 5 seconds remaining.
+
+### Focused device-auth regression
+
+Install the **newest successful** `VaultKey Debug CI` APK after this
+authentication change. Use only the disposable `test1` Login item and
+synthetic credential/TOTP values. Close the standalone HID Test Activity.
+
+1. Connect the Mac and select `Send username + Tab + password`.
+   Verify a real OS biometric/device-credential prompt appears **before**
+   the host confirmation. Cancel it: expect 0 Mac bytes.
+2. Approve a fresh prompt. The confirmation must include the intended
+   Mac's name **and** its Bluetooth MAC. Confirm within 15 seconds:
+   expect 29 bytes (5 username + Tab + 23 fake password), a real Tab focus
+   transition, and an Android `REPORTS_ACCEPTED` result.
+3. Repeat biometric verification, then wait 16+ seconds at the host
+   confirmation: expect 0 bytes and explicit expiry/no grant.
+4. Verify successfully then **cancel the host confirmation**. No sends
+   should occur, and the next attempt must prompt for device verification
+   again. Switch selected host or navigate away during a pending
+   verification: no send or stale authorization.
+5. Verify then send TOTP after confirming the host, comparing the 6-digit
+   code in the same time window. A current TOTP with <5 seconds left
+   must still be rejected, even following user verification.
+6. Optional: after successful device verification, interrupt a long
+   synthetic combined send by locking the screen. The sender must still
+   report INCOMPLETE/UNKNOWN and must not auto-replay any suffix.
+
+The authentication code is **debug-only**, still **NOT production ready**.
+A system device credential prompt does not fulfill a Bitwarden policy's
+master-password reprompt. Active-account/vault-lock policy handling,
+organization restrictions, audit, and production release integration remain
+separate mandatory security work before using any real password.
+No screenshots or logs of credentials or TOTP seeds.
+
+---
 ## Current milestone: test a harmless Bluetooth HID keyboard
 
 This development branch contains a **debug-only**, separate launcher Activity named **VaultKey HID Test**. It does not read the vault and **cannot send real vault passwords** yet. The purpose is to verify Bluetooth HID hardware compatibility and host typing accuracy.
