@@ -1,5 +1,58 @@
 # VaultKey Bluetooth HID prototype (Android / K20 Pro)
 
+## 2026-10-30: Live account / vault-lock / item permission fence (under test)
+
+The latest DEBUG-only bridge now obtains a `VaultKeySessionGateViewModel`
+via Hilt. It binds the Login item to the **active account ID present when
+the item screen is created**, and requires all of the following throughout
+every HID transfer:
+
+- The same account remains active, logged in and flagged unlocked by
+  Bitwarden's `AuthRepository.userStateFlow`.
+- `VaultLockManager.isVaultUnlocked(userId)` still reports unlocked.
+- The current `VaultRepository.getVaultItemStateFlow(itemId)` contains the
+  same Login cipher; deleted, removed, not-yet-loaded, and
+  `CipherRepromptType.PASSWORD` entries fail closed.
+- Password or combined action requires the **current** `viewPassword`
+  permission; current TOTP action requires personal Premium or
+  `organizationUseTotp`, consistent with the existing Login UI.
+- Authorization is rechecked immediately before each press and after the
+  last press, not only when the system biometric is approved. A revoked
+  session produces NOT SENT (0 presses) or INCOMPLETE/UNKNOWN after a
+  partial send, with **no automatic replay**.
+- Reactive flow listeners also invalidate outstanding confirmation tickets
+  and abort transport when account state, vault events or the item changes.
+
+This is a new code change, NOT hardware-verified yet. It is NOT a substitute
+for the native master-password reprompt. The Release variant remains closed.
+
+### Focused lock/account regression for the new APK
+
+Use only synthetic `test1` credentials and Mac ABC keyboard capture.
+
+1. Open `test1`, connect Mac and complete one *verified* combined send
+   (sanity: 29/29 and actual Tab focus change). Do not repeat old HID matrix.
+2. Open system verification; while the prompt is pending, trigger a vault
+   lock or account switch using normal Bitwarden controls where possible.
+   No valid confirmation or host bytes may follow.
+3. After verification succeeds, **lock the vault before Send once**. The
+   ticket must become unusable and the host must receive 0 bytes.
+4. Start the 29-byte combined send; lock the vault mid-input. The sender
+   must stop with INCOMPLETE/UNKNOWN and must never replay a suffix.
+   This may require a controlled test-only hook if the real UI cannot
+   lock while the Activity remains foreground. Do **not** fake this result.
+5. Switch Bitwarden active account while this item screen exists: its
+   old authorization must not become valid for the second account.
+6. Edit the synthetic test item to disable password visibility or delete
+   it before confirming; expect no password HID output.
+7. For a master-password-reprompt-protected item, the HID section remains
+   absent, as already verified. Real reprompt support is still a blocker.
+
+Only report real device evidence. If an interaction is not practical
+without an invasive test hook, mark it **NOT TESTED** and leave release
+blocked. Do not share real passwords, private account identifiers,
+TOTP seeds or sensitive full logcat in reports.
+
 ## Release security gate review — 2026-10-30
 
 **DEBUG transport functionality and on-device biometric tests have passed. This
